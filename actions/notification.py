@@ -4,14 +4,18 @@ import time
 from pathlib import Path
 
 
+import xml.sax.saxutils as saxutils
+
 def _send_toast(title: str, message: str, duration: int = 5):
     """Send a Windows toast notification using PowerShell."""
+    safe_title = saxutils.escape(title)
+    safe_message = saxutils.escape(message)
     ps_script = f'''
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
 $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
 $textNodes = $template.GetElementsByTagName("text")
-$textNodes.Item(0).AppendChild($template.CreateTextNode("{title}")) > $null
-$textNodes.Item(1).AppendChild($template.CreateTextNode("{message}")) > $null
+$textNodes.Item(0).AppendChild($template.CreateTextNode("{safe_title}")) > $null
+$textNodes.Item(1).AppendChild($template.CreateTextNode("{safe_message}")) > $null
 $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("MARK XL").Show($toast)
 '''

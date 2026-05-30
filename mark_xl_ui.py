@@ -2746,6 +2746,12 @@ class MainWindow(QMainWindow):
             security.encrypt_keys()
         except Exception:
             pass
+        # Clean up plaintext file after encryption
+        try:
+            if API_FILE.exists():
+                API_FILE.unlink()
+        except Exception:
+            pass
         self._ready = True
         if self._overlay:
             self._overlay.hide()

@@ -6,8 +6,10 @@ import sys
 
 try:
     import chromadb
+    from chromadb.config import Settings as _CS
 except ImportError:
     chromadb = None
+    _CS = None
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -26,7 +28,7 @@ class SemanticMemory:
         self.collection = None
         if chromadb:
             CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-            self.client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+            self.client = chromadb.PersistentClient(path=str(CHROMA_DIR), settings=_CS(anonymized_telemetry=False))
             self.collection = self.client.get_or_create_collection(name="mark_xl_memory")
             
     def add_fact(self, category: str, key: str, value: str):

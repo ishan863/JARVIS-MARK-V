@@ -7,10 +7,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -76,19 +77,20 @@ class DragRequest(BaseModel):
 # ── App factory ────────────────────────────────────────────────────────────
 
 def build_app(manager: "RemoteManager") -> FastAPI:
-    app = FastAPI(title="JARVIS Remote", docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def _lifespan(app_full):
+        manager._uvicorn_loop = asyncio.get_running_loop()
+        print(f"[Remote] FastAPI ready — {manager._scheme}://{manager.ip}:{manager.port}")
+        yield
+
+    app = FastAPI(title="JARVIS Remote", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=["http://localhost:5000", "http://127.0.0.1:5000", "https://localhost:5000"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    @app.on_event("startup")
-    async def _startup():
-        manager._uvicorn_loop = asyncio.get_event_loop()
-        print(f"[Remote] FastAPI ready — http://{manager.ip}:{manager.port}  PIN={manager.pin}")
 
     # ── Static files ───────────────────────────────────────────────────
     if STATIC_DIR.exists():
@@ -112,16 +114,7 @@ def build_app(manager: "RemoteManager") -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok": True, "pin": manager.pin, "ip": manager.ip, "port": manager.port}
-
-    @app.get("/api/pair")
-    async def pair_info():
-        return {
-            "pin": manager.pin,
-            "ip": manager.ip,
-            "port": manager.port,
-            "url": f"http://{manager.ip}:{manager.port}",
-        }
+        return {"ok": True, "connections": len(manager._clients)}
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest):
@@ -205,6 +198,33 @@ def build_app(manager: "RemoteManager") -> FastAPI:
             None, lambda: _do_drag(req.x1_pct, req.y1_pct, req.x2_pct, req.y2_pct)
         )
         return {"result": result}
+
+    @app.post("/api/upload")
+    async def upload_file(file: UploadFile = File(...), pin: str = Form("")):
+        if pin != manager.pin:
+            return JSONResponse({"error": "Invalid PIN"}, status_code=401)
+        try:
+            from pathlib import Path as _Path
+            import time
+            dest = _Path.home() / "Downloads" / f"mobile_{int(time.time())}_{file.filename}"
+            content = await file.read()
+            dest.write_bytes(content)
+            return {"status": "saved", "path": str(dest), "bytes": len(content)}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    @app.get("/api/download/{path:path}")
+    async def download_file(path: str, pin: str = ""):
+        if pin != manager.pin:
+            return JSONResponse({"error": "Invalid PIN"}, status_code=401)
+        try:
+            from pathlib import Path as _Path
+            fp = _Path.home() / path
+            if not fp.exists() or not fp.is_file():
+                return JSONResponse({"error": "File not found"}, status_code=404)
+            return FileResponse(str(fp))
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     # ── WebSocket ──────────────────────────────────────────────────────
 
@@ -321,6 +341,16 @@ async def _handle_ws_message(ws: WebSocket, msg: dict, manager: "RemoteManager")
         result = await loop.run_in_executor(None, lambda: _do_key(key))
         await ws.send_json({"type": "key_result", "data": result})
 
+    elif mtype == "file_list":
+        path = msg.get("data", "desktop")
+        result = await loop.run_in_executor(None, lambda: _list_files(path))
+        await ws.send_json({"type": "file_list_result", "data": result})
+
+    elif mtype == "file_download":
+        path = msg.get("data", "")
+        result = await loop.run_in_executor(None, lambda: _read_file_b64(path))
+        await ws.send_json({"type": "file_download_result", "data": result})
+
     elif mtype == "scroll":
         direction = msg.get("direction", "down")
         amount = int(msg.get("amount", 3))
@@ -342,6 +372,13 @@ async def _handle_ws_message(ws: WebSocket, msg: dict, manager: "RemoteManager")
             None, lambda: manager.execute_tool(tool, params)
         )
         await ws.send_json({"type": "tool_result", "data": result})
+
+    elif mtype == "regenerate_pin":
+        import random
+        manager.pin = f"{random.randint(1000, 9999)}"
+        print(f"[Remote] PIN regenerated: {manager.pin}")
+        await ws.send_json({"type": "paired", "data": f"New PIN: {manager.pin}"})
+        manager.broadcast_log(f"PIN regenerated to {manager.pin}")
 
     elif mtype == "ping":
         await ws.send_json({"type": "pong"})
@@ -418,12 +455,59 @@ def _do_drag(x1_pct: float, y1_pct: float, x2_pct: float, y2_pct: float) -> str:
         return f"Drag failed: {e}"
 
 
+# ── File listing & download helpers ────────────────────────────────────────
+
+def _list_files(folder: str) -> str:
+    """List files in a common folder. Returns formatted text."""
+    from pathlib import Path
+    folders = {
+        "desktop": Path.home() / "Desktop",
+        "downloads": Path.home() / "Downloads",
+        "documents": Path.home() / "Documents",
+    }
+    root = folders.get(folder, Path.home())
+    if not root.exists():
+        return f"Folder '{folder}' not found"
+    try:
+        lines = []
+        for f in sorted(root.iterdir()):
+            suffix = "/" if f.is_dir() else ""
+            size = f.stat().st_size if f.is_file() else 0
+            size_str = f"{size:,} B" if size < 1024 else f"{size/1024:.1f} KB" if size < 1048576 else f"{size/1048576:.1f} MB"
+            lines.append(f"{f.name}{suffix}  [{size_str}]")
+        return "\n".join(lines) if lines else "(empty)"
+    except Exception as e:
+        return f"Error: {e}"
+
+def _read_file_b64(path: str) -> str:
+    """Read a file and return base64 content."""
+    import base64 as _b64
+    from pathlib import Path
+    try:
+        fp = Path.home() / path
+        if not fp.exists() or not fp.is_file():
+            return ""
+        data = fp.read_bytes()
+        return _b64.b64encode(data).decode("ascii")
+    except Exception:
+        return ""
+
 # ── Audio conversion ───────────────────────────────────────────────────────
 
 def _convert_to_pcm16(raw: bytes, fmt: str) -> bytes:
     """Convert audio bytes to PCM 16kHz 16-bit mono for Gemini Live API."""
     if fmt == "pcm16":
         return raw
+    # Try pydub first for broad format support (webm, opus, ogg, mp4, etc.)
+    try:
+        from pydub import AudioSegment
+        import io as _io
+        seg = AudioSegment.from_file(_io.BytesIO(raw))
+        seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        return seg.raw_data
+    except Exception:
+        pass
+    # Fallback: WAV-only conversion
     try:
         import wave
         import io as _io

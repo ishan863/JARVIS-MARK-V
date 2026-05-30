@@ -59,9 +59,10 @@ def _set_clipboard_text(text: str):
     except ImportError:
         pass
     try:
+        escaped = text.replace("'", "''")
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             f'Set-Clipboard -Value @\"\n{text}\n\"@'],
+             f"Set-Clipboard -Value '{escaped}'"],
             capture_output=True, timeout=5
         )
     except Exception:

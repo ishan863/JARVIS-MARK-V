@@ -25,6 +25,9 @@ __pycache__/
 .sixth/
 data/
 
+# Auto-generated SSL certs
+.ssl/
+
 # OS files
 Thumbs.db
 .DS_Store

@@ -5,22 +5,31 @@ from core.security import security
 _CONFIG_PATH = Path(__file__).parent / "api_keys.json"
 _SETTINGS_PATH = Path(__file__).parent / "mark_xl_settings.json"
 
+_decrypted_cache: dict | None = None
+
 def get_config() -> dict:
+    global _decrypted_cache
+    if _decrypted_cache is not None:
+        return _decrypted_cache
     try:
         dec = security.decrypt_keys()
         if isinstance(dec, dict) and dec:
-            if not _CONFIG_PATH.exists():
-                try:
-                    _CONFIG_PATH.write_text(json.dumps(dec, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
-            return dec
+            _decrypted_cache = dec
+            return _decrypted_cache
     except Exception:
         pass
     if _CONFIG_PATH.exists():
-        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                _decrypted_cache = json.load(f)
+                return _decrypted_cache
+        except Exception:
+            pass
     return {}
+
+def clear_config_cache():
+    global _decrypted_cache
+    _decrypted_cache = None
 
 def get_settings() -> dict:
     if _SETTINGS_PATH.exists():

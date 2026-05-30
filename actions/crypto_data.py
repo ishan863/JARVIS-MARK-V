@@ -141,7 +141,10 @@ def crypto_data(parameters: dict, player=None, speak=None, broadcast=None) -> st
     """
     coin_name = parameters.get("coin", "bitcoin").strip()
     action = parameters.get("action", "all").lower().strip()
-    days = int(parameters.get("days", 7))
+    try:
+        days = int(parameters.get("days", 7))
+    except (ValueError, TypeError):
+        days = 7
     currency = parameters.get("currency", "usd").lower()
 
     coin_id = _resolve_coin_id(coin_name)

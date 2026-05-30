@@ -152,6 +152,9 @@ def register_actions():
     from actions.browser_playwright import browser_playwright_action
     from actions.vscode_controller import vscode_controller
     from actions.browser_agent import browser_agent
+    from actions.browser_v2 import browser_ai_task
+    from actions.excel_reporter import excel_report
+    from actions.data_pipeline import data_pipeline
 
     async def _run(fn, args, context, extra=None):
         kwargs = {"parameters": args, "player": context.ui}
@@ -180,6 +183,9 @@ def register_actions():
     orchestrator.register("vscode_controller", lambda a, ctx: _run(vscode_controller, a, ctx))
     orchestrator.register("vision_navigate", lambda a, ctx: _run(vision_navigate_tool, a, ctx))
     orchestrator.register("browser_agent", lambda a, ctx: _run(browser_agent, a, ctx, {"speak": ctx.speak}))
+    orchestrator.register("browser_ai", lambda a, ctx: _run(browser_ai_task, a, ctx, {"speak": ctx.speak}))
+    orchestrator.register("excel_report", lambda a, ctx: _run(excel_report, a, ctx))
+    orchestrator.register("data_pipeline", lambda a, ctx: _run(data_pipeline, a, ctx))
 
     # clipboard_manager
     from actions.clipboard_manager import clipboard_manager

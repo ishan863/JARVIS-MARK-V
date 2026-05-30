@@ -20,7 +20,7 @@ def _safe_eval(expr: str) -> str:
 
     clean = re.sub(r"[^0-9a-zA-Z_.,+\-*/()%^ \t]", "", expr)
     clean = clean.replace("^", "**")
-    clean = clean.replace("x", "*")
+    clean = re.sub(r"(?<![a-zA-Z])x(?![a-zA-Z])", "*", clean)
 
     try:
         result = eval(clean, {"__builtins__": {}}, allowed_names)

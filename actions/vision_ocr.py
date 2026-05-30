@@ -21,7 +21,10 @@ class VisionProcessor:
         if img is None:
             return {"error": "Could not read image"}
             
-        height, width, _ = img.shape
+        if len(img.shape) == 3:
+            height, width, _ = img.shape
+        else:
+            height, width = img.shape
         
         # Run OCR
         result = self.ocr_model.ocr(image_path, cls=True)

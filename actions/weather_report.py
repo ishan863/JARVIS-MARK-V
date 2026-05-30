@@ -191,10 +191,13 @@ def weather_action(parameters: dict, player=None, speak=None, broadcast=None) ->
             except Exception as e:
                 _log(f"Broadcast error: {e}")
 
+        forecast_day = forecast[0]['day'] if forecast else "N/A"
+        hi = max_temps[0] if max_temps else "N/A"
+        lo = min_temps[0] if min_temps else "N/A"
         result = (
             f"{emoji} {display_name}: {temp}°C, {condition}. "
             f"Feels like {feels_like}°C. Humidity: {humidity}%, Wind: {wind_speed} km/h {wind_dir}. "
-            f"UV Index: {uv}. {forecast[0]['day']} high/low: {max_temps[0]}/{min_temps[0]}°C."
+            f"UV Index: {uv}. {forecast_day} high/low: {hi}/{lo}°C."
         )
         _log(result)
         return result

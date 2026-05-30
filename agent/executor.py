@@ -83,22 +83,33 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
         code = response.text.strip()
         code = re.sub(r"```(?:python)?", "", code).strip().rstrip("`").strip()
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False, encoding="utf-8"
-        ) as f:
+        # Sandboxed execution: run in a temp directory with stripped environment
+        sandbox_dir = tempfile.mkdtemp(prefix="jarvis_sandbox_")
+        tmp_path = os.path.join(sandbox_dir, "generated_code.py")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(code)
-            tmp_path = f.name
 
-        print(f"[Executor] 🐍 Running generated code: {tmp_path}")
+        print(f"[Executor] Running generated code in sandbox: {sandbox_dir}")
+
+        # Minimal environment to prevent access to secrets
+        safe_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(home),
+            "USERNAME": os.environ.get("USERNAME", "user"),
+            "TMP": sandbox_dir,
+            "PYTHONIOENCODING": "utf-8",
+        }
 
         result = subprocess.run(
             [sys.executable, tmp_path],
             capture_output=True, text=True,
-            timeout=120, cwd=str(Path.home())
+            timeout=120, cwd=sandbox_dir, env=safe_env
         )
 
+        # Cleanup sandbox
         try:
             os.unlink(tmp_path)
+            os.rmdir(sandbox_dir)
         except Exception:
             pass
 
@@ -266,8 +277,7 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
         return flight_finder(parameters=parameters, player=None, speak=speak) or "Done."
 
     else:
-        print(f"[Executor] ⚠️ Unknown tool '{tool}' — falling back to generated_code")
-        return _run_generated_code(f"Accomplish this task: {parameters}", speak=speak)
+        raise ValueError(f"Unknown tool '{tool}'. Available tools: file_controller, browser_control, web_search, computer_control, computer_settings, generated_code, flight_finder, dev_agent, code_helper, calculator, youtube_video, weather_report, crypto_data, reminder, send_message, notification, clipboard_manager, media_control, game_updater, desktop, vision_ocr, file_processor")
 
 class AgentExecutor:
 

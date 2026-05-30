@@ -1,9 +1,42 @@
 import os
+import re
 import shutil
 import time
 import platform
 from pathlib import Path
 from datetime import datetime
+from collections import OrderedDict
+
+try:
+    from wcmatch import glob as wc_glob
+    _WCMATCH = True
+except ImportError:
+    _WCMATCH = False
+
+try:
+    import humanize
+    _HUMANIZE = True
+except ImportError:
+    _HUMANIZE = False
+
+try:
+    import git
+    _GITPYTHON = True
+except ImportError:
+    _GITPYTHON = False
+
+try:
+    import magic
+    _FILE_MAGIC = True
+except ImportError:
+    _FILE_MAGIC = False
+
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    _WATCHDOG = True
+except ImportError:
+    _WATCHDOG = False
 
 try:
     import send2trash
@@ -14,7 +47,7 @@ except ImportError:
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 # Recent files cache — tracks files created/written by the assistant
-_RECENT_FILES: dict[str, str] = {}  # filename.lower() -> full path
+_RECENT_FILES: OrderedDict[str, str] = OrderedDict()  # filename.lower() -> full path
 
 # Lazy import for folder name index
 _FOLDER_INDEX = None
@@ -27,14 +60,15 @@ def _get_folder_index():
     return _FOLDER_INDEX
 
 def _track_file(path: Path):
-    """Store file in recent files cache."""
-    _RECENT_FILES[path.name.lower()] = str(path.resolve())
-    # Also store without extension
-    _RECENT_FILES[path.stem.lower()] = str(path.resolve())
-    # Trim cache to last 50 entries
-    if len(_RECENT_FILES) > 50:
-        for k in sorted(_RECENT_FILES)[:-50]:
-            del _RECENT_FILES[k]
+    """Store file in recent files cache (LRU)."""
+    resolved = str(path.resolve())
+    _RECENT_FILES[path.name.lower()] = resolved
+    _RECENT_FILES.move_to_end(path.name.lower())
+    _RECENT_FILES[path.stem.lower()] = resolved
+    _RECENT_FILES.move_to_end(path.stem.lower())
+    # Evict oldest (LRU) when over limit
+    while len(_RECENT_FILES) > 50:
+        _RECENT_FILES.popitem(last=False)
 
 def _find_recent(name: str) -> str | None:
     """Look up a file by name in recent files cache."""
@@ -382,7 +416,7 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
 
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
-        return f"Moved: {src.name} → {dst.parent.name}/"
+        return f"Moved: {src.name} -> {dst.parent.name}/"
 
     except Exception as e:
         return f"Could not move: {e}"
@@ -413,7 +447,7 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
         else:
             shutil.copy2(str(src), str(dst))
 
-        return f"Copied: {src.name} → {dst.parent.name}/"
+        return f"Copied: {src.name} -> {dst.parent.name}/"
 
     except Exception as e:
         return f"Could not copy: {e}"
@@ -435,7 +469,7 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
             return f"A file named '{new_name}' already exists here."
 
         target.rename(new_path)
-        return f"Renamed: {target.name} → {new_name}"
+        return f"Renamed: {target.name} -> {new_name}"
 
     except Exception as e:
         return f"Could not rename: {e}"
@@ -605,7 +639,7 @@ def organize_desktop() -> str:
                 continue
 
             shutil.move(str(item), str(new_path))
-            moved.append(f"{item.name} → {target_dir.name}/")
+            moved.append(f"{item.name} -> {target_dir.name}/")
 
         result = f"Desktop organized: {len(moved)} files moved."
         if moved:
@@ -650,11 +684,12 @@ def get_file_info(path: str, name: str = "") -> str:
 def _get_rag_collection():
     """Get or create ChromaDB collection for file content."""
     try:
+        import posthog; posthog.capture = lambda *a, **kw: None
         import chromadb
-        import os
+        from chromadb.config import Settings as _CS
         db_path = Path(__file__).resolve().parent.parent / "memory" / "chroma_db"
         db_path.mkdir(parents=True, exist_ok=True)
-        client = chromadb.PersistentClient(str(db_path))
+        client = chromadb.PersistentClient(str(db_path), settings=_CS(anonymized_telemetry=False))
         return client.get_or_create_collection("file_index")
     except Exception:
         return None
@@ -783,6 +818,141 @@ def search_code(query: str, path: str = "home") -> str:
         return f"No code files found containing '{query}'."
     except Exception as e:
         return f"Code search failed: {e}"
+
+
+def _format_size(size: int) -> str:
+    if _HUMANIZE:
+        return humanize.naturalsize(size, binary=True)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PB"
+
+
+def _detect_mime(path: Path) -> str:
+    if _FILE_MAGIC:
+        try:
+            mime = magic.Magic(mime=True)
+            return mime.from_file(str(path))
+        except Exception:
+            pass
+    suffix_map = {
+        ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+        ".xml": "application/xml", ".html": "text/html", ".pdf": "application/pdf",
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".gif": "image/gif", ".webp": "image/webp", ".mp3": "audio/mpeg",
+        ".mp4": "video/mp4", ".zip": "application/zip", ".py": "text/x-python",
+        ".js": "text/javascript", ".ts": "text/typescript", ".md": "text/markdown",
+    }
+    return suffix_map.get(path.suffix.lower(), "application/octet-stream")
+
+
+def bulk_rename(path: Path, pattern: str, replacement: str, dry_run: bool = True) -> str:
+    if not _WCMATCH:
+        return "wcmatch not installed. Run: pip install wcmatch"
+    results = []
+    glob_re = re.escape(pattern).replace(r"\*", "(.*)")
+    for item in path.rglob("*"):
+        if item.is_file() and wc_glob.globmatch(item.name, pattern, flags=wc_glob.GLOBSTAR):
+            m = re.match(glob_re, item.name)
+            if not m:
+                continue
+            # Support {1} {2} or \1 \2 style replacements
+            new_name = replacement
+            for i, group in enumerate(m.groups(), 1):
+                new_name = new_name.replace(f"{{{i}}}", group).replace(f"\\{i}", group)
+            new_path = item.parent / new_name
+            if new_path == item:
+                continue
+            if not dry_run:
+                if new_path.exists():
+                    new_path.unlink()
+                item.rename(new_path)
+            results.append(f"  {item.name} -> {new_name}")
+    if not results:
+        return f"No files matched pattern: {pattern}"
+    summary = f"{'[DRY RUN] ' if dry_run else ''}Renamed {len(results)} files:\n"
+    summary += "\n".join(results[:50])
+    if len(results) > 50:
+        summary += f"\n  ... and {len(results) - 50} more"
+    return summary
+
+
+def git_operation(path: Path, action: str, **kwargs) -> str:
+    if not _GITPYTHON:
+        return "GitPython not installed. Run: pip install gitpython"
+    try:
+        repo = git.Repo(path)
+    except git.InvalidGitRepositoryError:
+        return f"Not a git repository: {path}"
+
+    try:
+        if action == "status":
+            return repo.git.status()
+        elif action == "diff":
+            return repo.git.diff()[:2000]
+        elif action == "log":
+            return repo.git.log(oneline=True, max_count=15)
+        elif action == "commit":
+            files = kwargs.get("files", ".")
+            msg = kwargs.get("message", "Auto-commit from MARK XL")
+            repo.index.add(files)
+            repo.index.commit(msg)
+            return f"Committed with message: {msg}"
+        elif action == "add":
+            repo.index.add(kwargs.get("files", "."))
+            return f"Staged: {kwargs.get('files', '.')}"
+        elif action == "pull":
+            repo.remotes.origin.pull()
+            return "Pulled latest from origin"
+        elif action == "push":
+            repo.remotes.origin.push()
+            return "Pushed to origin"
+        elif action == "branch":
+            return "\n".join(f"  {'*' if b.name == repo.active_branch.name else ' '} {b.name}" for b in repo.branches)
+        else:
+            return f"Unknown git action: {action}. Use: status, diff, log, commit, add, pull, push, branch"
+    except Exception as e:
+        return f"Git {action} failed: {e}"
+
+
+_watchdog_observers = {}
+
+
+def file_watch_start(path: Path) -> str:
+    if not _WATCHDOG:
+        return "watchdog not installed. Run: pip install watchdog"
+
+    class _AgentHandler(FileSystemEventHandler):
+        def __init__(self, watch_path):
+            self.watch_path = watch_path
+        def on_modified(self, event):
+            if not event.is_directory:
+                print(f"[FileWatch] Modified: {event.src_path}")
+        def on_created(self, event):
+            if not event.is_directory:
+                print(f"[FileWatch] Created: {event.src_path}")
+        def on_deleted(self, event):
+            if not event.is_directory:
+                print(f"[FileWatch] Deleted: {event.src_path}")
+
+    observer = Observer()
+    handler = _AgentHandler(path)
+    observer.schedule(handler, str(path), recursive=True)
+    observer.start()
+    _watchdog_observers[str(path)] = observer
+    return f"Watching: {path}"
+
+
+def file_watch_stop(path: Path) -> str:
+    key = str(path)
+    if key in _watchdog_observers:
+        _watchdog_observers[key].stop()
+        _watchdog_observers[key].join()
+        del _watchdog_observers[key]
+        return f"Stopped watching: {path}"
+    return f"No watcher found for: {path}"
 
 
 def file_controller(
@@ -926,6 +1096,34 @@ def file_controller(
                     return f"Opened: {resolved.name}"
             else:
                 return f"File not found: {target_name or target_path}"
+
+        elif action == "bulk_rename":
+            pattern = params.get("pattern", "")
+            replacement = params.get("replacement", "")
+            dry_run = params.get("dry_run", True)
+            if not pattern or replacement is None:
+                return "bulk_rename requires 'pattern' and 'replacement' parameters"
+            result = bulk_rename(path, pattern, replacement, dry_run=dry_run)
+
+        elif action == "mime":
+            resolved = _resolve_path(name or path)
+            if resolved and resolved.exists():
+                detected = _detect_mime(resolved)
+                result = f"{resolved.name}: {detected}"
+            else:
+                result = "File not found"
+
+        elif action == "git":
+            git_action = params.get("git_action", "status")
+            git_msg = params.get("message", "Auto-commit from MARK XL")
+            git_files = params.get("files", ".")
+            result = git_operation(path, git_action, message=git_msg, files=git_files)
+
+        elif action == "watch_start":
+            result = file_watch_start(path)
+
+        elif action == "watch_stop":
+            result = file_watch_stop(path)
 
         else:
             return f"Unknown action: '{action}'"

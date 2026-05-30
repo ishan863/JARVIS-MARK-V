@@ -1,3 +1,21 @@
+import os
+os.environ["CHROMA_TELEMETRY_ENABLED"] = "false"
+
+# ── ChromaDB telemetry hotfix ──
+# chromadb 0.4.18 passes 3 positional args to posthog.capture(), but posthog 7.x
+# only accepts 1 positional arg (event). Monkey-patch to silence the noise.
+try:
+    import posthog
+    posthog.capture = lambda *args, **kwargs: None
+except Exception:
+    pass
+# Also monkey-patch chromadb's abstract capture (belt + suspenders)
+try:
+    import chromadb.telemetry.product as _ctp
+    _ctp.ProductTelemetryClient.capture = lambda self, event: None
+except Exception:
+    pass
+
 import asyncio
 import re
 import threading
@@ -687,6 +705,75 @@ TOOL_DECLARATIONS = [
             "required": ["action"]
         }
     },
+    {
+        "name": "browser_ai",
+        "description": (
+            "AI-powered autonomous browser agent. Uses LLM vision to understand web pages, "
+            "fill forms, log into sites, extract data, navigate complex workflows. "
+            "Best for: multi-step web tasks like 'find the invoice from last month and download it', "
+            "'log into my email and check for important messages', "
+            "'search for flights and compare prices'. "
+            "Modes: auto (autonomous agent), extract (extract data from a URL), "
+            "screenshot (take a screenshot of a page), crawl (convert page to markdown)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "goal": {"type": "STRING", "description": "The task to accomplish in the browser"},
+                "mode": {"type": "STRING", "description": "auto | extract | screenshot | crawl (default: auto)"},
+                "url":  {"type": "STRING", "description": "URL for extract/screenshot/crawl modes"},
+            },
+            "required": ["goal"]
+        }
+    },
+    {
+        "name": "excel_report",
+        "description": (
+            "Create professional Excel reports with pivot tables, charts, auto-filters, "
+            "conditional formatting, formulas, and formatted cells. "
+            "Actions: create (formatted report from data), pivot (pivot table from CSV/xlsx source), "
+            "chart (add chart to workbook), formula (evaluate Excel formulas), "
+            "live (read/write Excel cells via COM automation — requires Excel installed)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":       {"type": "STRING", "description": "create | pivot | chart | formula | live"},
+                "output_path":  {"type": "STRING", "description": "Path to save the Excel file"},
+                "data_source":  {"type": "STRING", "description": "Source CSV/xlsx for pivot action"},
+                "headers":      {"type": "ARRAY",  "items": {"type": "STRING"}, "description": "Column headers for create action"},
+                "rows":         {"type": "ARRAY",  "items": {"type": "ARRAY", "items": {"type": "STRING"}}, "description": "Data rows for create action"},
+                "sheet_name":   {"type": "STRING", "description": "Sheet name (default: Report)"},
+                "title":        {"type": "STRING", "description": "Report title"},
+                "index":        {"type": "ARRAY",  "items": {"type": "STRING"}, "description": "Pivot row fields"},
+                "columns":      {"type": "ARRAY",  "items": {"type": "STRING"}, "description": "Pivot column fields"},
+                "values":       {"type": "ARRAY",  "items": {"type": "STRING"}, "description": "Pivot value fields"},
+                "chart_type":   {"type": "STRING", "description": "bar | column | line | pie | area"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "data_pipeline",
+        "description": (
+            "Intelligent data processing pipeline. Handles CSV, Excel, JSON, Parquet files. "
+            "Actions: load (show columns/stats), clean (remove duplicates/empty rows), "
+            "transform (AI-powered transformation via natural language instructions), "
+            "validate (check data quality), analyze (full statistics), "
+            "convert (change format), describe (column details)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":      {"type": "STRING", "description": "load | clean | transform | validate | analyze | convert | describe"},
+                "source":      {"type": "STRING", "description": "Path to source file (CSV/Excel/JSON/Parquet)"},
+                "output":      {"type": "STRING", "description": "Output path for transform/convert actions"},
+                "instruction": {"type": "STRING", "description": "Natural language transformation instruction"},
+                "format":      {"type": "STRING", "description": "Target format for convert: csv | parquet | json | xlsx"},
+            },
+            "required": ["action"]
+        }
+    },
 ]
 
 class JarvisLive:
@@ -712,7 +799,7 @@ class JarvisLive:
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
+                turns=types.Content(role="user", parts=[types.Part(text=text)]),
                 turn_complete=True
             ),
             self._loop
@@ -741,7 +828,7 @@ class JarvisLive:
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
+                turns=types.Content(role="user", parts=[types.Part(text=text)]),
                 turn_complete=True
             ),
             self._loop
@@ -828,7 +915,7 @@ class JarvisLive:
             if not args.get("file_path") and self.ui.current_file:
                 args["file_path"] = self.ui.current_file
 
-        context = ToolContext(ui=self.ui, speak=self.speak, loop=asyncio.get_event_loop())
+        context = ToolContext(ui=self.ui, speak=self.speak, loop=asyncio.get_running_loop())
 
         try:
             result = await orchestrator.route(name, args, context)
@@ -917,7 +1004,7 @@ class JarvisLive:
     async def _listen_audio(self):
         print("[JARVIS] [Mic] Started")
         import numpy as np
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         chunk_count = 0
 
         device_idx = None
@@ -1118,7 +1205,7 @@ class JarvisLive:
                                     id=fc.id, name=fc.name,
                                     response={"result": "Task started. Check UI log for progress."}
                                 ))
-                                context = ToolContext(ui=self.ui, speak=self.speak, loop=asyncio.get_event_loop())
+                                context = ToolContext(ui=self.ui, speak=self.speak, loop=asyncio.get_running_loop())
                                 try:
                                     asyncio.ensure_future(self._run_background_agent(fc, context))
                                 except Exception as e:
@@ -1208,40 +1295,28 @@ class JarvisLive:
                 pass
 
     async def _gpu_monitor(self):
-        """Keep GPU active and report stats every 15 seconds."""
-        cycle = 0
+        """Report GPU stats every 30 seconds without wasteful compute."""
         while True:
-            await asyncio.sleep(15)
+            await asyncio.sleep(30)
             try:
                 from core.gpu import format_status, is_available, empty_cache
                 if is_available():
-                    # Small GPU compute to keep utilization visible
-                    if cycle % 2 == 0:
-                        import torch
-                        a = torch.randn(2000, 2000, device="cuda")
-                        b = torch.randn(2000, 2000, device="cuda")
-                        c = a @ b
-                        torch.cuda.synchronize()
-                        _ = c.sum().item()
-                    else:
-                        empty_cache()
-                    cycle += 1
+                    empty_cache()
                     status = format_status()
                     self.ui.write_log(status)
             except Exception:
                 pass
 
     async def run(self):
-        client = genai.Client(
-            api_key=_get_api_key(),
-            http_options={"api_version": "v1beta"}
-        )
-
-        reconnect_delay = 3  # Start with 3 seconds
-        max_reconnect_delay = 30  # Cap at 30 seconds
+        reconnect_delay = 3
+        max_reconnect_delay = 30
         
         while True:
             try:
+                client = genai.Client(
+                    api_key=_get_api_key(),
+                    http_options={"api_version": "v1beta"}
+                )
                 print("[JARVIS] [Conn] Connecting...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()
@@ -1251,7 +1326,7 @@ class JarvisLive:
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session        = session
-                    self._loop          = asyncio.get_event_loop()
+                    self._loop          = asyncio.get_running_loop()
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue      = asyncio.Queue()
                     self._turn_done_event = asyncio.Event()

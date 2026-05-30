@@ -291,9 +291,8 @@ def _process_text_doc(path: Path, file_type: str, action: str,
     }
 
     if action not in prompt_map:
-
-        action  = "custom"
-        instruction = action
+        action      = "custom"
+        instruction = params.get("instruction", "")
 
     try:
         model    = _gemini_client()

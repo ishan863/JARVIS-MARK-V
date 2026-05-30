@@ -74,25 +74,25 @@ class HeadlessUI:
     def set_state(self, state: str):
         asyncio.run_coroutine_threadsafe(
             self.manager.broadcast({"type": "state", "data": state}),
-            asyncio.get_event_loop()
+            asyncio.get_running_loop()
         )
 
     def write_log(self, text: str):
         asyncio.run_coroutine_threadsafe(
             self.manager.broadcast({"type": "log", "data": text}),
-            asyncio.get_event_loop()
+            asyncio.get_running_loop()
         )
 
     def set_input_text(self, text: str):
         asyncio.run_coroutine_threadsafe(
             self.manager.broadcast({"type": "input", "data": text}),
-            asyncio.get_event_loop()
+            asyncio.get_running_loop()
         )
 
     def set_output_text(self, text: str):
         asyncio.run_coroutine_threadsafe(
             self.manager.broadcast({"type": "output", "data": text}),
-            asyncio.get_event_loop()
+            asyncio.get_running_loop()
         )
 
 class AssistantLive:
@@ -114,7 +114,7 @@ class AssistantLive:
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
+                turns=types.Content(role="user", parts=[types.Part(text=text)]),
                 turn_complete=True
             ),
             self._loop
@@ -138,7 +138,7 @@ class AssistantLive:
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
+                turns=types.Content(role="user", parts=[types.Part(text=text)]),
                 turn_complete=True
             ),
             self._loop
@@ -201,7 +201,7 @@ class AssistantLive:
             if not args.get("file_path") and self.ui.current_file:
                 args["file_path"] = self.ui.current_file
 
-        context = ToolContext(ui=self.ui, speak=self.speak, loop=asyncio.get_event_loop())
+        context = ToolContext(ui=self.ui, speak=self.speak, loop=asyncio.get_running_loop())
 
         try:
             result = await orchestrator.route(name, args, context)
@@ -235,7 +235,7 @@ class AssistantLive:
 
     async def _listen_audio(self):
         import numpy as np
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         chunk_count = 0
         sent_count = 0
         last_report_time = time.time()
@@ -427,18 +427,18 @@ class AssistantLive:
             stream.close()
 
     async def run(self):
-        api_key = _get_api_key()
-        if not api_key:
-            self.ui.write_log("SYS: Gemini API Key missing. Please provide API Keys.")
-            return
-
-        client = genai.Client(
-            api_key=api_key,
-            http_options={"api_version": "v1beta"}
-        )
-
         while True:
             try:
+                api_key = _get_api_key()
+                if not api_key:
+                    self.ui.write_log("SYS: Gemini API Key missing. Please provide API Keys.")
+                    await asyncio.sleep(5)
+                    continue
+
+                client = genai.Client(
+                    api_key=api_key,
+                    http_options={"api_version": "v1beta"}
+                )
                 self.ui.set_state("THINKING")
                 config = self._build_config()
 
@@ -447,7 +447,7 @@ class AssistantLive:
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
-                    self._loop = asyncio.get_event_loop()
+                    self._loop = asyncio.get_running_loop()
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue()
                     self._turn_done_event = asyncio.Event()
