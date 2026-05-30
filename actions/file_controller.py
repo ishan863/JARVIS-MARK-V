@@ -217,14 +217,19 @@ def _format_size(b: int) -> str:
 
 def _safe_trash(target: Path) -> str:
 
-    if not _SEND2TRASH:
-        return (
-            "send2trash is not installed. "
-            "Run: pip install send2trash — "
-            "Permanent deletion is disabled for safety."
-        )
-    send2trash.send2trash(str(target))
-    return f"Moved to Trash: {target.name}"
+    if _SEND2TRASH:
+        send2trash.send2trash(str(target))
+        return f"Moved to Trash: {target.name}"
+
+    # Fallback: permanent delete when send2trash is not installed
+    try:
+        if target.is_dir():
+            shutil.rmtree(str(target))
+        else:
+            target.unlink()
+        return f"Permanently deleted: {target.name}"
+    except Exception as e:
+        return f"Could not delete: {e}"
 
 
 def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
