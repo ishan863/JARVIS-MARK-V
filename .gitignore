@@ -1,0 +1,43 @@
+# API Keys & Secrets — NEVER COMMIT
+config/api_keys.json
+config/api_keys.enc
+config/master.key
+
+# Personal data & memory
+memory/long_term.json
+session-ses_*.md
+session-*.md
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Hidden data directories
+.sixth/
+data/
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Runtime browser data
+memory/browser_screenshots/
+memory/browser_videos/
+
+# ChromaDB vector database (auto-generated)
+memory/chroma_db/
+
+# Environment
+.env
+.env.local
+*.env

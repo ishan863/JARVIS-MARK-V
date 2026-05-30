@@ -1,0 +1,7 @@
+{
+  "chat_model": "gemini-2.5-flash",
+  "vision_model": "gemini-2.5-flash",
+  "theme": "Cyberpunk",
+  "autonomous": false,
+  "notifications": true
+}
