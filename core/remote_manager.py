@@ -194,15 +194,15 @@ class RemoteManager:
 
     def route_text_to_jarvis(self, text: str):
         """Send a text message from phone to the JARVIS Live session."""
-        if not self._jarvis or not self._main_loop:
+        if not self._jarvis or not self._main_loop or not self._jarvis.session:
             return
-        from google.genai import types as gtypes
+        from google.genai import types
         asyncio.run_coroutine_threadsafe(
             self._jarvis.session.send_client_content(
-                turns=gtypes.Content(role="user", parts=[gtypes.Part(text=text)]),
-                turn_complete=True,
+                turns=types.Content(role="user", parts=[types.Part(text=text)]),
+                turn_complete=True
             ),
-            self._main_loop,
+            self._main_loop
         )
 
     def route_audio_to_jarvis(self, pcm_bytes: bytes):
@@ -210,12 +210,44 @@ class RemoteManager:
         if not self._jarvis or not self._main_loop or not self._jarvis.session:
             return
         from google.genai import types as gtypes
-        asyncio.run_coroutine_threadsafe(
-            self._jarvis.session.send_realtime_input(
+        async def _send():
+            self._jarvis._phone_audio_active = True
+            await self._jarvis.session.send_realtime_input(
                 audio=gtypes.Blob(data=pcm_bytes, mime_type="audio/pcm;rate=16000")
-            ),
-            self._main_loop,
-        )
+            )
+        asyncio.run_coroutine_threadsafe(_send(), self._main_loop)
+
+    def route_audio_chunk(self, pcm_bytes: bytes):
+        """Send a streaming audio chunk from phone to Gemini (real-time)."""
+        if not self._jarvis or not self._main_loop or not self._jarvis.session:
+            return
+        from google.genai import types as gtypes
+        async def _send():
+            self._jarvis._phone_audio_active = True
+            await self._jarvis.session.send_realtime_input(
+                audio=gtypes.Blob(data=pcm_bytes, mime_type="audio/pcm;rate=16000")
+            )
+        asyncio.run_coroutine_threadsafe(_send(), self._main_loop)
+
+    def route_audio_end(self):
+        """Signal Gemini that the phone user stopped speaking (turn_complete)."""
+        if not self._jarvis or not self._main_loop or not self._jarvis.session:
+            return
+        async def _send():
+            await self._jarvis.session.send_client_content(turn_complete=True)
+        asyncio.run_coroutine_threadsafe(_send(), self._main_loop)
+
+    def broadcast_audio_response(self, wav_b64: str):
+        """Send AI voice audio (WAV base64) to all paired phone clients."""
+        self._broadcast_sync({"type": "ai_audio", "data": wav_b64, "format": "audio/wav"})
+
+    def broadcast_input_transcript(self, text: str):
+        """Send live input transcription to all paired phone clients."""
+        self._broadcast_sync({"type": "ai_input_transcript", "data": text})
+
+    def broadcast_file_push(self, file_name: str, file_b64: str):
+        """Send a file (name + base64 data) to all paired phone clients."""
+        self._broadcast_sync({"type": "file_push", "name": file_name, "data": file_b64})
 
     def execute_tool(self, tool_name: str, params: dict) -> str:
         """Execute a JARVIS tool from the phone and return the result."""

@@ -4,8 +4,6 @@ import time
 import traceback
 from typing import Any, Callable, Coroutine, Optional
 
-from google.genai import types
-
 
 class ToolContext:
     """Context passed to every tool handler."""
@@ -130,6 +128,16 @@ class Orchestrator:
 orchestrator = Orchestrator()
 
 
+def _phone_broadcast(file_name: str, file_b64: str):
+    """Broadcast a file to all paired phone clients. Safe to call from any thread."""
+    try:
+        from core.remote_manager import remote_manager
+        if remote_manager:
+            remote_manager.broadcast_file_push(file_name, file_b64)
+    except Exception:
+        pass
+
+
 def register_actions():
     from actions.file_processor import file_processor
     from actions.flight_finder import flight_finder
@@ -165,7 +173,10 @@ def register_actions():
     orchestrator.register("open_app", lambda a, ctx: _run(open_app, a, ctx))
     orchestrator.register("weather_report", lambda a, ctx: _run(weather_action, a, ctx))
     orchestrator.register("browser_control", lambda a, ctx: _run(browser_control, a, ctx))
-    orchestrator.register("file_controller", lambda a, ctx: _run(file_controller, a, ctx))
+    orchestrator.register("file_controller", lambda a, ctx: _run(
+        file_controller, a, ctx,
+        {"loop": ctx.loop, "broadcast_fn": _phone_broadcast}
+    ))
     orchestrator.register("send_message", lambda a, ctx: _run(send_message, a, ctx, {"response": None, "session_memory": None}))
     orchestrator.register("reminder", lambda a, ctx: _run(reminder, a, ctx, {"response": None}))
     orchestrator.register("youtube_video", lambda a, ctx: _run(youtube_video, a, ctx, {"response": None}))

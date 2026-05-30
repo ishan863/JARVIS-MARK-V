@@ -29,11 +29,6 @@ def _get_base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent
 
-from config import get_config
-
-def _get_api_key() -> str:
-    return get_config().get("gemini_api_key", "")
-
 def _get_macos_wifi_interface() -> str:
     try:
         result = subprocess.run(
@@ -729,8 +724,7 @@ def get_system_performance() -> str:
 
 def _detect_action(description: str) -> dict:
 
-    from google import genai
-    client = genai.Client(api_key=_get_api_key())
+    from core.model_router import router
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + \
                 ", volume_set, type_text, press_key, reload_n"
@@ -754,11 +748,8 @@ Rules:
 - Return ONLY the JSON, no explanation, no markdown."""
 
     try:
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[prompt]
-        )
-        text = re.sub(r"```(?:json)?", "", resp.text).strip().rstrip("`").strip()
+        text = router.smart_route(prompt, task_type="reasoning")
+        text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
         return json.loads(text)
     except Exception as e:
         print(f"[Settings] Intent detection failed: {e}")

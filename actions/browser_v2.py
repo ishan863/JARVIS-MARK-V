@@ -13,7 +13,7 @@ def _get_client():
         import google.genai as genai
         key = get_api_key()
         if key:
-            _client = genai.Client(api_key=key, http_options={"api_version": "v1beta"})
+            _client = genai.Client(api_key=key)
     return _client
 
 

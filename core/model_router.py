@@ -42,13 +42,13 @@ class ModelRouter:
             "free": True,
         },
         "groq": {
-            "models": ["llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"],
+            "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "meta-llama/llama-4-scout-17b-16e-instruct"],
             "cost_per_1k_out": 0.0,
             "premium": False,
             "free": True,
         },
         "nvidia": {
-            "models": ["deepseek-ai/deepseek-v4-flash", "meta/llama-3.1-8b-instruct", "mistralai/mistral-7b-instruct-v0.3", "google/gemma-2-9b-it", "microsoft/phi-3-mini-4k-instruct"],
+            "models": ["deepseek-ai/deepseek-v4-flash", "nvidia/nemotron-3-super-120b-a12b", "meta/llama-3.3-70b-instruct", "mistralai/mistral-large-3-675b-instruct-2512"],
             "cost_per_1k_out": 0.0,
             "premium": False,
             "free": True,
@@ -74,27 +74,27 @@ class ModelRouter:
     }
 
     # AGENT → MODEL MAPPING:
-    # code_gen:           dev_agent, code_helper → NVIDIA DeepSeek V4 → DeepSeek → Gemini → Groq
-    # code_review:        error_handler, code_helper refactor/self-fix → NVIDIA → Gemini → Groq
-    # quick_chat:         general conversation → Groq (fastest) → Gemini → NVIDIA
-    # vision:             screen_processor, browser_agent → Gemini (only vision-capable)
-    # planning:           planner, dev_agent plan → Gemini → Groq → NVIDIA
-    # web_search:         web_search → Groq → Gemini
-    # summarization:      file_processor → Groq → Gemini → NVIDIA
-    # reasoning:          error_handler, planner → Gemini → Groq → NVIDIA
-    # creative:           general → Gemini → Groq → NVIDIA
-    # default:            fallback → Gemini → Groq → NVIDIA → DeepSeek
+    # code_gen:           NVIDIA DeepSeek V4 (284B MoE, 1M ctx) — best free coder
+    # code_review:        NVIDIA Nemotron-3 Super (120B MoE, 1M ctx) — reasoning specialist
+    # quick_chat:         Groq Llama 3.3 70B (fastest inference) — speed matters
+    # vision:             Gemini only (no other free model handles vision)
+    # planning:           NVIDIA Nemotron-3 Super — structured planning
+    # web_search:         Groq (fast, simple)
+    # summarization:      Groq (speed) → NVIDIA (fallback)
+    # reasoning:          NVIDIA Nemotron-3 Super — agentic reasoning
+    # creative:           Groq (fast brainstorming)
+    # default:            NVIDIA → Groq (all free, no Gemini)
     TASK_ROUTING = {
-        "code_gen":       ["nvidia", "deepseek", "gemini", "groq"],
-        "code_review":    ["nvidia", "gemini", "groq"],
-        "quick_chat":     ["groq", "gemini", "nvidia"],
-        "vision":         ["gemini"],
-        "planning":       ["gemini", "groq", "nvidia"],
-        "web_search":     ["groq", "gemini"],
-        "summarization":  ["groq", "gemini", "nvidia"],
-        "reasoning":      ["gemini", "groq", "nvidia"],
-        "creative":       ["gemini", "groq", "nvidia"],
-        "default":        ["gemini", "groq", "nvidia", "deepseek"],
+        "code_gen":       ["nvidia", "groq"],
+        "code_review":    ["nvidia", "groq"],
+        "quick_chat":     ["groq", "nvidia"],
+        "vision":         ["nvidia", "groq"],
+        "planning":       ["nvidia", "groq"],
+        "web_search":     ["groq"],
+        "summarization":  ["groq", "nvidia"],
+        "reasoning":      ["nvidia", "groq"],
+        "creative":       ["groq", "nvidia"],
+        "default":        ["nvidia", "groq"],
     }
 
     def __init__(self):

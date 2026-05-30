@@ -1,3 +1,4 @@
+import base64 as _b64
 import os
 os.environ["CHROMA_TELEMETRY_ENABLED"] = "false"
 
@@ -289,18 +290,18 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "file_controller",
-        "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage. Also supports semantic search (find_by_content), code search (search_code), directory indexing (index_directory), and folder name search (find_folder) using AI. Use 'run' to execute Python files. Files created/written are automatically cached for later lookup.",
+        "description": "Multi-stage file & folder manager. Supports multi-step workflows: use explore_folder to find a folder and auto-list its contents, then use relative paths like 'docs' or 'images' for follow-up actions (list, create, delete, etc.). Actions: list, create_file, create_folder, delete, move, copy, rename, read, write, find, run, find_folder, explore_folder, find_by_content, search_code, index_directory, largest, disk_usage, organize_desktop, info.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "list | create_file | create_folder | delete | move | copy | rename | read | write | find | run | find_folder | find_by_content | search_code | index_directory | largest | disk_usage | organize_desktop | info"},
-                "path":        {"type": "STRING", "description": "File/folder path or shortcut: desktop, downloads, documents, home"},
+                "action":      {"type": "STRING", "description": "explore_folder: find folder by name & list contents (best for multi-step nav). list: show folder contents. create_file | create_folder | delete | move | copy | rename | read | write | find | run | find_folder | find_by_content | search_code | index_directory | largest | disk_usage | organize_desktop | info"},
+                "path":        {"type": "STRING", "description": "Path or shortcut (desktop, downloads, documents, home). Supports relative paths from the last navigated folder."},
                 "destination": {"type": "STRING", "description": "Destination path for move/copy"},
                 "new_name":    {"type": "STRING", "description": "New name for rename"},
                 "content":     {"type": "STRING", "description": "Content for create_file/write"},
-                "name":        {"type": "STRING", "description": "File name to search for, or folder name query for find_folder"},
+                "name":        {"type": "STRING", "description": "File/folder name query for find / find_folder / explore_folder actions"},
                 "extension":   {"type": "STRING", "description": "File extension to search (e.g. .pdf)"},
-                "query":       {"type": "STRING", "description": "Search query for find_by_content / search_code / find_folder"},
+                "query":       {"type": "STRING", "description": "Search query for find_by_content / search_code / find_folder / explore_folder"},
                 "count":       {"type": "INTEGER", "description": "Number of results for largest"},
             },
             "required": ["action"]
@@ -790,6 +791,7 @@ class JarvisLive:
         self.ui.on_text_command = self._on_text_command
         self._turn_done_event: asyncio.Event | None = None
         self._speaking_start_time = 0.0
+        self._phone_audio_active = False
         # Remote control manager
         from core.remote_manager import remote_manager
         self._remote = remote_manager
@@ -995,7 +997,7 @@ class JarvisLive:
                 await asyncio.sleep(0.1)
 
     async def _signal_turn_complete(self):
-        """Tell the Live API the user finished speaking, so it responds immediately."""
+        """Signal the server that user finished speaking, so it responds immediately."""
         try:
             await self.session.send_client_content(turn_complete=True)
         except Exception as e:
@@ -1009,7 +1011,7 @@ class JarvisLive:
 
         device_idx = None
         # Base multiplier and dynamic AGC state
-        base_boost = 3.0
+        base_boost = 5.0
         agc_gain = base_boost
         # Local VAD state — detect silence to signal turn completion
         _last_voice_time = time.perf_counter()
@@ -1067,18 +1069,25 @@ class JarvisLive:
                     rms = np.sqrt(np.mean(audio_float**2))
                     
                     # Only send audio if there's actual voice activity (above noise floor)
-                    if rms > 100:  # Increased threshold to filter ambient noise
+                    if rms > 10:  # Lower threshold for sensitive mic catch
                         _last_voice_time = time.perf_counter()
                         _turn_signaled = False
-                        target_rms = 6000.0
+                        target_rms = 10000.0
                         instant_gain = target_rms / rms
                         # Limit maximum boost to prevent screaming background noise
-                        instant_gain = np.clip(instant_gain, 1.0, 15.0)
-                        # Smooth adaptation
-                        agc_gain = 0.8 * agc_gain + 0.2 * instant_gain
+                        instant_gain = np.clip(instant_gain, 1.0, 25.0)
+                        # Smooth adaptation (faster response)
+                        agc_gain = 0.7 * agc_gain + 0.3 * instant_gain
                     else:
                         # Decay back to base boost slowly in silence
                         agc_gain = 0.95 * agc_gain + 0.05 * base_boost
+                        # Local VAD: after 0.6s of silence, signal turn_complete so server responds immediately
+                        silence_duration = time.perf_counter() - _last_voice_time
+                        if silence_duration > 0.6 and not _turn_signaled:
+                            _turn_signaled = True
+                            asyncio.run_coroutine_threadsafe(
+                                self._signal_turn_complete(), loop
+                            )
                         # Don't send silence/ambient noise to API
                         return
                     
@@ -1100,15 +1109,7 @@ class JarvisLive:
                         bar = "=" * int(min(30, amplitude / 1000))
                         print(f"\r[JARVIS Mic Input] Level: {amplitude:<5} {bar:<30}", end="", flush=True)
 
-                    # Local VAD: after 0.6s of silence, signal turn_complete to API
-                    # so it responds immediately instead of waiting for server-side VAD
-                    silence_duration = time.perf_counter() - _last_voice_time
-                    if rms <= 100 and silence_duration > 0.6 and not _turn_signaled:
-                        _turn_signaled = True
-                        asyncio.run_coroutine_threadsafe(
-                            self._signal_turn_complete(), loop
-                        )
-
+                    # Server-side VAD handles turn completion automatically
                     # Use call_soon_threadsafe with try-except to handle queue full
                     try:
                         loop.call_soon_threadsafe(
@@ -1150,6 +1151,22 @@ class JarvisLive:
     async def _receive_audio(self):
         print("[JARVIS] [Recv] Started")
         out_buf, in_buf = [], []
+        phone_audio_buf = []
+        phone_active = False
+
+        def _flush_phone_audio():
+            nonlocal phone_audio_buf, phone_active
+            if phone_audio_buf:
+                total = b"".join(phone_audio_buf)
+                import wave, io as _iow
+                wav_io = _iow.BytesIO()
+                with wave.open(wav_io, "wb") as wf:
+                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(24000)
+                    wf.writeframes(total)
+                wav_b64 = _b64.b64encode(wav_io.getvalue()).decode("ascii")
+                self._remote.broadcast_audio_response(wav_b64)
+                phone_audio_buf = []
+            phone_active = False
 
         try:
             while True:
@@ -1158,7 +1175,10 @@ class JarvisLive:
                     if response.data:
                         if self._turn_done_event and self._turn_done_event.is_set():
                             self._turn_done_event.clear()
-                        self.audio_in_queue.put_nowait(response.data)
+                        if self._phone_audio_active:
+                            phone_audio_buf.append(response.data)
+                        else:
+                            self.audio_in_queue.put_nowait(response.data)
 
                     if response.server_content:
                         sc = response.server_content
@@ -1169,6 +1189,8 @@ class JarvisLive:
                                 out_buf.append(txt)
                                 current_output = " ".join(out_buf).strip()
                                 self.ui.set_output_text(current_output)
+                                if self._phone_audio_active:
+                                    self._remote.broadcast_text(current_output)
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
@@ -1176,6 +1198,9 @@ class JarvisLive:
                                 in_buf.append(txt)
                                 current_transcript = " ".join(in_buf).strip()
                                 self.ui.set_input_text(current_transcript)
+                                if self._phone_audio_active:
+                                    full = " ".join(in_buf).strip()
+                                    self._remote.broadcast_input_transcript(full)
 
                         if sc.turn_complete:
                             if self._turn_done_event:
@@ -1190,10 +1215,13 @@ class JarvisLive:
                             full_out = " ".join(out_buf).strip()
                             if full_out:
                                 self.ui.write_log(f"Jarvis: {full_out}")
-                                # Forward to connected phone clients
                                 self._remote.broadcast_text(full_out)
                             out_buf = []
                             self.ui.set_output_text("")
+
+                            if self._phone_audio_active:
+                                _flush_phone_audio()
+                            self._phone_audio_active = False
 
                     if response.tool_call:
                         fn_responses = []
@@ -1315,7 +1343,7 @@ class JarvisLive:
             try:
                 client = genai.Client(
                     api_key=_get_api_key(),
-                    http_options={"api_version": "v1beta"}
+                    http_options={"api_version": "v1beta"},
                 )
                 print("[JARVIS] [Conn] Connecting...")
                 self.ui.set_state("THINKING")

@@ -1,19 +1,8 @@
 import json
 import re
-import sys
 import time
 from pathlib import Path
 from enum import Enum
-
-
-def get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-
-BASE_DIR = get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
 class ErrorDecision(Enum):
@@ -50,33 +39,13 @@ Return ONLY valid JSON:
 """
 
 
-def _get_api_key() -> str:
-    try:
-        from config import get_config
-        return get_config().get("gemini_api_key", "")
-    except Exception:
-        pass
-    try:
-        with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)["gemini_api_key"]
-    except Exception:
-        return ""
-
-
 def _use_router(prompt: str, task_type: str = "reasoning") -> str:
     try:
         from core.model_router import router
         return router.smart_route(prompt, task_type=task_type)
     except Exception:
-        import google.genai as genai
-        key = _get_api_key()
-        if not key:
-            return "Error generating response: no API key available"
-        client = genai.Client(api_key=key)
-        return client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt
-        ).text
+        from core.model_router import router
+        return router.generate(prompt, provider="groq")
 
 
 def analyze_error(step: dict, error: str, attempt: int = 1, max_attempts: int = 2) -> dict:
@@ -227,7 +196,7 @@ def apply_auto_patch(patch_json: str, base_dir: str = None) -> str:
     except Exception:
         return "Invalid patch format."
 
-    root = Path(base_dir) if base_dir else BASE_DIR
+    root = Path(base_dir) if base_dir else Path(__file__).resolve().parent.parent
     fix_type = patch.get("fix_type", "manual")
 
     if fix_type == "patch":

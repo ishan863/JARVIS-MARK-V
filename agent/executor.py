@@ -10,6 +10,7 @@ from typing import Callable
 
 from agent.planner       import create_plan, replan
 from agent.error_handler import analyze_error, generate_fix, ErrorDecision
+from core.model_router import router
 
 
 def get_base_dir() -> Path:
@@ -22,24 +23,7 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-def _get_api_key() -> str:
-    try:
-        from config import get_config
-        key = get_config().get("gemini_api_key", "")
-        if key:
-            return key
-    except Exception:
-        pass
-    try:
-        with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)["gemini_api_key"]
-    except Exception:
-        return ""
-
 def _run_generated_code(description: str, speak: Callable | None = None) -> str:
-    import google.genai as genai
-    from google.genai import types
-
     if speak:
         speak("Writing custom code for this task, sir.")
 
@@ -57,30 +41,22 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
         except Exception:
             pass
 
-    key = _get_api_key()
-    if not key:
-        return "No API key available"
-    client = genai.Client(api_key=key)
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=f"Write Python code to accomplish this task:\n\n{description}",
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "You are an expert Python developer. "
-                    "Write clean, complete, working Python code. "
-                    "Use standard library + common packages. "
-                    "Install missing packages with subprocess + pip if needed. "
-                    "Return ONLY the Python code. No explanation, no markdown, no backticks.\n\n"
-                    f"SYSTEM PATHS:\n"
-                    f"  Desktop   = r'{desktop}'\n"
-                    f"  Downloads = r'{downloads}'\n"
-                    f"  Documents = r'{documents}'\n"
-                    f"  Home      = r'{home}'\n"
-                )
-            )
+        sys_instr = (
+            "You are an expert Python developer. "
+            "Write clean, complete, working Python code. "
+            "Use standard library + common packages. "
+            "Install missing packages with subprocess + pip if needed. "
+            "Return ONLY the Python code. No explanation, no markdown, no backticks.\n\n"
+            f"SYSTEM PATHS:\n"
+            f"  Desktop   = r'{desktop}'\n"
+            f"  Downloads = r'{downloads}'\n"
+            f"  Documents = r'{documents}'\n"
+            f"  Home      = r'{home}'\n"
         )
-        code = response.text.strip()
+        prompt = f"{sys_instr}\n\nWrite Python code to accomplish this task:\n\n{description}"
+        code = router.smart_route(prompt=prompt, task_type="code_gen")
+        code = code.strip()
         code = re.sub(r"```(?:python)?", "", code).strip().rstrip("`").strip()
 
         # Sandboxed execution: run in a temp directory with stripped environment
@@ -152,21 +128,13 @@ def _inject_context(params: dict, tool: str, step_results: dict, goal: str = "")
 
     return params
 def _detect_language(text: str) -> str:
-    import google.genai as genai
-    key = _get_api_key()
-    if not key:
-        return "English"
-    client = genai.Client(api_key=key)
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=(
-                f"What language is this text written in? "
-                f"Reply with ONLY the language name in English (e.g. Turkish, English, French).\n\n"
-                f"Text: {text[:200]}"
-            )
+        prompt = (
+            f"What language is this text written in? "
+            f"Reply with ONLY the language name in English (e.g. Turkish, English, French).\n\n"
+            f"Text: {text[:200]}"
         )
-        return response.text.strip()
+        return router.smart_route(prompt=prompt, task_type="reasoning").strip()
     except Exception:
         return "English"
 
@@ -175,12 +143,6 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
     if not goal:
         return content
     try:
-        import google.genai as genai
-        key = _get_api_key()
-        if not key:
-            return content
-        client = genai.Client(api_key=key)
-
         target_lang = _detect_language(goal)
         print(f"[Executor] 🌐 Translating to: {target_lang}")
 
@@ -194,11 +156,7 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
             f"- Output ONLY the translated text, nothing else\n\n"
             f"Text to translate:\n{content[:4000]}"
         )
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        translated = response.text.strip()
+        translated = router.smart_route(prompt=prompt, task_type="reasoning").strip()
         print(f"[Executor] ✅ Translation done ({target_lang})")
         return translated
     except Exception as e:
@@ -410,11 +368,6 @@ class AgentExecutor:
     def _summarize(self, goal: str, completed_steps: list, speak: Callable | None) -> str:
         fallback = f"All done, sir. Completed {len(completed_steps)} steps for: {goal[:60]}."
         try:
-            import google.genai as genai
-            key = _get_api_key()
-            if not key:
-                raise Exception("No API key")
-            client = genai.Client(api_key=key)
             steps_str = "\n".join(f"- {s.get('description', '')}" for s in completed_steps)
             prompt    = (
                 f'User goal: "{goal}"\n'
@@ -422,11 +375,7 @@ class AgentExecutor:
                 "Write a single natural sentence summarizing what was accomplished. "
                 "Address the user as 'sir'. Be direct and positive."
             )
-            response = client.models.generate_content(
-                model="gemini-2.5-flash-lite",
-                contents=prompt
-            )
-            summary  = response.text.strip()
+            summary = router.smart_route(prompt=prompt, task_type="summarization").strip()
             if speak: speak(summary)
             return summary
         except Exception:

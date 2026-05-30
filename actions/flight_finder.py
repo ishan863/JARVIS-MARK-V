@@ -14,14 +14,6 @@ def _get_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
-
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
 _MONTH_MAP: dict[str, int] = {
 
     "january": 1, "february": 2, "march": 3,     "april": 4,
@@ -62,20 +54,13 @@ def _parse_date(raw: str) -> str:
             return val.strftime("%Y-%m-%d")
 
     try:
-        import google.genai as genai
-        key = _get_api_key()
-        if not key:
-            raise Exception("No API key")
-        client = genai.Client(api_key=key)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=(
-                f"Today is {today.strftime('%Y-%m-%d')}. "
-                f"Convert this date expression to YYYY-MM-DD: '{raw}'. "
-                f"Return ONLY the date string, nothing else."
-            )
+        from core.model_router import router
+        prompt = (
+            f"Today is {today.strftime('%Y-%m-%d')}. "
+            f"Convert this date expression to YYYY-MM-DD: '{raw}'. "
+            f"Return ONLY the date string, nothing else."
         )
-        result = response.text.strip()
+        result = router.smart_route(prompt, task_type="reasoning").strip()
         if re.match(r"\d{4}-\d{2}-\d{2}", result):
             return result
     except Exception as e:
@@ -156,15 +141,14 @@ def _parse_flights_with_gemini(
     destination: str,
     date:        str,
 ) -> list[dict]:
-    import google.genai as genai
-    from google.genai import types
+    from core.model_router import router
 
-    key = _get_api_key()
-    if not key:
-        return []
-    client = genai.Client(api_key=key)
-
-    prompt = (
+    system_prompt = (
+        "You are a flight data extraction expert. "
+        "Extract flight information from raw webpage text. "
+        "Return ONLY valid JSON — no markdown, no explanation."
+    )
+    prompt = system_prompt + "\n\n" + (
         f"Extract flight options from {origin} to {destination} on {date} "
         f"from this Google Flights page text:\n\n{raw_text[:12000]}\n\n"
         f"Return a JSON array of up to 5 flights:\n"
@@ -174,18 +158,8 @@ def _parse_flights_with_gemini(
     )
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "You are a flight data extraction expert. "
-                    "Extract flight information from raw webpage text. "
-                    "Return ONLY valid JSON — no markdown, no explanation."
-                ),
-            )
-        )
-        text     = re.sub(r"```(?:json)?", "", response.text).strip().rstrip("`").strip()
+        text = router.smart_route(prompt, task_type="summarization")
+        text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
         flights  = json.loads(text)
         return flights if isinstance(flights, list) else []
     except Exception as e:

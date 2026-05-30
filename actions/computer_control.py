@@ -323,49 +323,49 @@ def _focus_window(title: str) -> str:
 
     return f"focus_window: unknown OS '{os_name}'"
 
+def _ua_match_score(target: str, candidate: str) -> float:
+    if target == candidate:
+        return 1.0
+    if target in candidate:
+        return 0.9 + (len(target) / max(len(candidate), 1)) * 0.1
+    t_words = set(target.split())
+    c_words = set(candidate.split())
+    if t_words and c_words:
+        return len(t_words & c_words) / len(t_words) * 0.8
+    return 0.0
+
+
 def _screen_find(description: str) -> tuple[int, int] | None:
-    api_key = _get_api_key()
-    if not api_key:
-        print("[ComputerControl] ⚠️ No API key for screen_find")
-        return None
+    """Find a UI element by description using Windows UI Automation (no API calls)."""
+    import uiautomation as auto
 
+    target_lower = description.lower().strip()
     try:
-        from google import genai
-        from google.genai import types as gtypes
+        root = auto.GetRootControl()
+        best = (None, 0.0)
 
-        _require_pyautogui()
-        w, h  = pyautogui.size()
-        img   = pyautogui.screenshot()
-        buf   = io.BytesIO()
-        img.save(buf, format="PNG")
-        image_bytes = buf.getvalue()
+        def _search(control, depth=0, max_depth=5):
+            nonlocal best
+            if depth > max_depth:
+                return
+            try:
+                name = (control.Name or "").strip()
+                if name:
+                    score = _ua_match_score(target_lower, name.lower())
+                    if score > best[1]:
+                        best = (control, score)
+                for child in control.GetChildren():
+                    _search(child, depth + 1, max_depth)
+            except Exception:
+                pass
 
-        client = genai.Client(api_key=api_key)
-        prompt = (
-            f"Return ONLY a 2D bounding box [ymin, xmin, ymax, xmax] for the UI element described as: '{description}'. "
-            f"If the element is not visible, reply: NOT_FOUND"
-        )
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                gtypes.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                prompt,
-            ],
-        )
-
-        text = (response.text or "").strip()
-        if "NOT_FOUND" in text.upper():
-            return None
-
-        # Parse [ymin, xmin, ymax, xmax] from 0-1000 scale
-        match = re.search(r"\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]", text)
-        if match:
-            ymin, xmin, ymax, xmax = map(int, match.groups())
-            center_x = int(((xmin + xmax) / 2) / 1000 * w)
-            center_y = int(((ymin + ymax) / 2) / 1000 * h)
-            return center_x, center_y
-
+        _search(root)
+        ctrl = best[0]
+        if ctrl and ctrl.BoundingRectangle:
+            rect = ctrl.BoundingRectangle
+            cx = (rect.left + rect.right) // 2
+            cy = (rect.top + rect.bottom) // 2
+            return cx, cy
     except Exception as e:
         print(f"[ComputerControl] ⚠️ screen_find failed: {e}")
 

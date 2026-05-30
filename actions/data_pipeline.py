@@ -98,13 +98,7 @@ def _transform_data(source: str, instruction: str, output: str) -> str:
         "sample": df.head(3).to_pandas().to_dict(orient="records"),
     }
 
-    import google.genai as genai
-    from core.utils import get_api_key
-
-    key = get_api_key()
-    if not key:
-        return "API key not available for AI transformation."
-    client = genai.Client(api_key=key, http_options={"api_version": "v1beta"})
+    from core.model_router import router
 
     prompt = f"""Given a DataFrame with:
 Columns: {context['columns']}
@@ -118,11 +112,7 @@ The variable `df` contains the loaded DataFrame.
 Return ONLY the Python code to produce the result. No markdown."""
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
-        code = response.text.strip()
+        code = router.smart_route(prompt, task_type="code_gen").strip()
         import re
         code = re.sub(r"```(?:python)?", "", code).strip().rstrip("`").strip()
 

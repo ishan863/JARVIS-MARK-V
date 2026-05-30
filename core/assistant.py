@@ -172,7 +172,6 @@ class AssistantLive:
             output_audio_transcription={},
             input_audio_transcription={},
             system_instruction="\n".join(parts),
-            tools=[{"function_declarations": TOOL_DECLARATIONS}],
             session_resumption=types.SessionResumptionConfig(),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
@@ -435,10 +434,7 @@ class AssistantLive:
                     await asyncio.sleep(5)
                     continue
 
-                client = genai.Client(
-                    api_key=api_key,
-                    http_options={"api_version": "v1beta"}
-                )
+                client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
                 self.ui.set_state("THINKING")
                 config = self._build_config()
 

@@ -49,6 +49,9 @@ _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 # Recent files cache — tracks files created/written by the assistant
 _RECENT_FILES: OrderedDict[str, str] = OrderedDict()  # filename.lower() -> full path
 
+# Current working directory — tracks where the AI is navigating
+_CWD: str = ""  # last folder the AI listed/navigated to
+
 # Lazy import for folder name index
 _FOLDER_INDEX = None
 
@@ -196,7 +199,16 @@ def _resolve_path(raw: str) -> Path:
     expanded = Path(raw).expanduser()
     if expanded.is_absolute():
         return expanded
-    # Relative path — try to find on Desktop
+    # Relative path — try from CWD first (if set)
+    if _CWD:
+        cwd_candidate = Path(_CWD) / raw.strip()
+        if cwd_candidate.exists():
+            return cwd_candidate
+        # Fuzzy match inside CWD
+        cwd_fuzzy = _fuzzy_find(Path(_CWD), raw.strip())
+        if cwd_fuzzy:
+            return cwd_fuzzy
+    # Fallback: try to find on Desktop
     desktop = _get_desktop()
     candidate = desktop / raw.strip()
     if candidate.exists():
@@ -210,7 +222,7 @@ def _resolve_path(raw: str) -> Path:
     match = idx.quick_find(raw.strip(), threshold=0.7)
     if match:
         return Path(match)
-    # Fallback: return Desktop-relative path anyway (caller handles not-found)
+    # Fallback: return last-resort candidate (caller handles not-found)
     return candidate
 
 
@@ -267,18 +279,21 @@ def _safe_trash(target: Path) -> str:
 
 
 def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
+    global _CWD
     try:
         target = _resolve_path(path)
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         if not target.exists():
-            # Suggest similar folders on Desktop
             suggestions = _suggest_folders(path)
             if suggestions:
                 return f"Path not found: '{path}'. Did you mean one of: {', '.join(suggestions)}?"
             return f"Path not found: {target}"
         if not target.is_dir():
             return f"Not a directory: {target.name}"
+
+        # Set CWD so relative paths work for next action
+        _CWD = str(target.resolve())
 
         items = []
         for item in sorted(target.iterdir()):
@@ -960,7 +975,10 @@ def file_controller(
     response=None,
     player=None,
     session_memory=None,
+    loop=None,
+    broadcast_fn=None,
 ) -> str:
+    global _CWD
     params = parameters or {}
     action = params.get("action", "").lower().strip()
     path   = params.get("path", "desktop")
@@ -1044,16 +1062,44 @@ def file_controller(
                 if not matches:
                     result = f"No folders found matching '{query}'."
                 elif len(matches) == 1 and matches[0][2] >= 0.85:
-                    result = f"Opened: {matches[0][1]}"
+                    fp = matches[0][1]
+                    _CWD = str(Path(fp).resolve())
                     try:
-                        os.startfile(matches[0][1])
+                        os.startfile(fp)
                     except Exception:
                         pass
+                    # Auto-list folder contents so AI knows what's inside
+                    result = f"Navigated to: {fp}\n" + list_files(fp)
                 else:
                     lines = [f"Found {len(matches)} folders matching '{query}':"]
-                    for i, (name, path, score) in enumerate(matches, 1):
+                    for i, (name, p, score) in enumerate(matches, 1):
                         pct = int(score * 100)
-                        lines.append(f"  {i}. {name}  ({path})  [{pct}%]")
+                        lines.append(f"  {i}. {name}  ({p})  [{pct}%]")
+                    result = "\n".join(lines)
+
+        elif action == "explore_folder":
+            query = name or params.get("query", "")
+            if not query:
+                result = "Provide a folder name to explore."
+            else:
+                idx = _get_folder_index()
+                matches = idx.search(query, top_n=5)
+                if not matches:
+                    target = _resolve_path(query) if query else None
+                    if target and target.exists() and _is_safe_path(target):
+                        _CWD = str(target.resolve())
+                        result = list_files(str(target))
+                    else:
+                        result = f"No folders found matching '{query}'."
+                elif len(matches) == 1 and matches[0][2] >= 0.70:
+                    fp = Path(matches[0][1])
+                    _CWD = str(fp.resolve())
+                    result = list_files(str(fp))
+                else:
+                    lines = [f"Found {len(matches)} folders matching '{query}':"]
+                    for i, (name, p, score) in enumerate(matches, 1):
+                        pct = int(score * 100)
+                        lines.append(f"  {i}. {name}  ({p})  [{pct}%]")
                     result = "\n".join(lines)
 
         elif action == "index_directory":
@@ -1096,6 +1142,20 @@ def file_controller(
                     return f"Opened: {resolved.name}"
             else:
                 return f"File not found: {target_name or target_path}"
+
+        elif action == "send_to_phone":
+            target = _resolve_path(name or path)
+            if not target.exists():
+                result = f"File not found: {target.name}"
+            elif target.is_dir():
+                result = f"Cannot send a directory: {target.name}"
+            else:
+                data = target.read_bytes()
+                import base64 as _b64
+                b64 = _b64.b64encode(data).decode("ascii")
+                if broadcast_fn:
+                    broadcast_fn(target.name, b64)
+                result = f"Sent '{target.name}' to phone ({len(data)} bytes)"
 
         elif action == "bulk_rename":
             pattern = params.get("pattern", "")

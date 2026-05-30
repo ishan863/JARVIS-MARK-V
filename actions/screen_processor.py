@@ -72,7 +72,7 @@ def _get_api_key() -> str:
 def _get_os() -> str:
     return _load_config().get("os_system", "windows").lower()
 
-_LIVE_MODEL         = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+_LIVE_MODEL         = "gemini-3.1-flash-live-preview"
 _CHANNELS           = 1
 _RECEIVE_SAMPLE_RATE = 24_000
 _CHUNK_SIZE         = 1_024
@@ -281,10 +281,7 @@ class _VisionSession:
         self._out_queue = asyncio.Queue(maxsize=30)
         self._audio_in  = asyncio.Queue()
 
-        client = genai.Client(
-            api_key=_get_api_key(),
-            http_options={"api_version": "v1beta"},
-        )
+        client = genai.Client(api_key=_get_api_key(), http_options={"api_version": "v1beta"})
         config = gtypes.LiveConnectConfig(
             response_modalities=["AUDIO"],
             output_audio_transcription={},
@@ -295,6 +292,17 @@ class _VisionSession:
                         voice_name="Charon"
                     )
                 )
+            ),
+            session_resumption=gtypes.SessionResumptionConfig(),
+            realtime_input_config=gtypes.RealtimeInputConfig(
+                automatic_activity_detection=gtypes.AutomaticActivityDetection(
+                    start_of_speech_sensitivity=gtypes.StartSensitivity.START_SENSITIVITY_HIGH,
+                    end_of_speech_sensitivity=gtypes.EndSensitivity.END_SENSITIVITY_HIGH,
+                    silence_duration_ms=250,
+                    prefix_padding_ms=150,
+                ),
+                activity_handling=gtypes.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+                turn_coverage=gtypes.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
             ),
         )
 
@@ -465,132 +473,149 @@ def warmup_session(player=None) -> None:
         print("[GPU] PyTorch not installed")
 
 
-# ---- UI Element Detection (Phase 2: Browser Vision) ----
+# ---- UI Element Detection (Phase 2: Windows UI Automation) ----
+
+
+def _walk_elements(control, elements: list, depth: int, max_depth: int):
+    if depth > max_depth:
+        return
+    try:
+        name = (control.Name or "").strip()
+        ct = control.ControlType
+        from uiautomation import ControlType
+
+        type_map = {
+            ControlType.ButtonControl: "button",
+            ControlType.EditControl: "input",
+            ControlType.HyperlinkControl: "link",
+            ControlType.ComboBoxControl: "input",
+            ControlType.CheckBoxControl: "button",
+            ControlType.RadioButtonControl: "button",
+            ControlType.TabItemControl: "button",
+            ControlType.MenuItemControl: "button",
+            ControlType.ListItemControl: "button",
+            ControlType.TreeItemControl: "button",
+        }
+        ctype = type_map.get(ct, "button" if ct not in (ControlType.PaneControl, ControlType.WindowControl) else "")
+        if ctype and name:
+            rect = control.BoundingRectangle
+            elements.append({
+                "name": name,
+                "type": ctype,
+                "bbox": [rect.left, rect.top, rect.right, rect.bottom],
+            })
+        for child in control.GetChildren():
+            _walk_elements(child, elements, depth + 1, max_depth)
+    except Exception:
+        pass
+
 
 def detect_ui_elements(angle: str = "screen") -> list[dict]:
-    """Send screenshot to Gemini and return detected clickable elements with coordinates."""
-    try:
-        if angle == "camera":
-            image_bytes, mime_type = _capture_camera()
-        else:
-            image_bytes, mime_type = _capture_screen()
-    except Exception as e:
-        return [{"error": f"Capture failed: {e}"}]
+    """Use Windows UI Automation to enumerate clickable elements."""
+    import uiautomation as auto
 
-    b64 = base64.b64encode(image_bytes).decode("ascii")
-    prompt = (
-        "List all clickable UI elements visible in this image (buttons, links, input fields, icons). "
-        "For each element, provide: name (what it is/label), type (button/link/input/icon), "
-        "and approximate bounding box as x1,y1,x2,y2 coordinates. "
-        "Return ONLY valid JSON array like: "
-        '[{"name":"Submit","type":"button","bbox":[100,200,180,240]}, ...]'
-    )
-
-    client = genai.Client(api_key=_get_api_key(), http_options={"api_version": "v1beta"})
+    elements = []
     try:
-        response = client.models.generate_content(
-            model="models/gemini-2.5-flash",
-            contents=[prompt, {"inline_data": {"mime_type": mime_type, "data": b64}}],
-        )
-        text = response.text.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        try:
-            elements = json.loads(text)
-        except json.JSONDecodeError:
-            return [{"error": f"Model returned non-JSON: {text[:200]}"}]
-        if isinstance(elements, list):
-            return elements
-        return []
+        root = auto.GetRootControl()
+        for window in root.GetChildren():
+            if not window.Name:
+                continue
+            _walk_elements(window, elements, 0, 4)
     except Exception as e:
         return [{"error": f"UI detection failed: {e}"}]
+    return elements
+
+
+def _collect_names(control, names: list, depth: int, max_depth: int):
+    if depth > max_depth:
+        return
+    try:
+        if control.Name:
+            names.append(control.Name.strip()[:60])
+        for child in control.GetChildren():
+            _collect_names(child, names, depth + 1, max_depth)
+    except Exception:
+        pass
 
 
 def describe_current_view(angle: str = "screen") -> str:
-    """Return a semantic description of what is currently on screen."""
-    try:
-        if angle == "camera":
-            image_bytes, mime_type = _capture_camera()
-        else:
-            image_bytes, mime_type = _capture_screen()
-    except Exception as e:
-        return f"Capture failed: {e}"
+    """Return a semantic description of what is currently on screen via Windows UI Automation."""
+    import uiautomation as auto
 
-    b64 = base64.b64encode(image_bytes).decode("ascii")
-    prompt = "Describe what you see on this screen in 1-2 sentences. Focus on the main content and any clickable elements."
-
-    client = genai.Client(api_key=_get_api_key(), http_options={"api_version": "v1beta"})
     try:
-        response = client.models.generate_content(
-            model="models/gemini-2.5-flash",
-            contents=[prompt, {"inline_data": {"mime_type": mime_type, "data": b64}}],
-        )
-        return response.text.strip()
+        root = auto.GetRootControl()
+        parts = []
+        for window in root.GetChildren():
+            if not window.Name:
+                continue
+            line = f"Window: {window.Name}"
+            child_names = []
+            _collect_names(window, child_names, 0, 2)
+            if child_names:
+                line += f" — contains: {', '.join(child_names[:10])}"
+            parts.append(line)
+        return "\n".join(parts[:5]) if parts else "No windows detected."
     except Exception as e:
         return f"Description failed: {e}"
 
 
+def _ua_match_score(target: str, candidate: str) -> float:
+    if target == candidate:
+        return 1.0
+    if target in candidate:
+        return 0.9 + (len(target) / max(len(candidate), 1)) * 0.1
+    t_words = set(target.split())
+    c_words = set(candidate.split())
+    if t_words and c_words:
+        return len(t_words & c_words) / len(t_words) * 0.8
+    return 0.0
+
+
 def vision_find_and_click(target_description: str, angle: str = "screen") -> str:
-    """Find a UI element by description and return its coordinates for clicking."""
-    elements = detect_ui_elements(angle)
-    if not elements or "error" in str(elements[0] if elements else ""):
-        return json.dumps({"found": False, "error": f"Could not detect UI elements: {elements}"})
+    """Find a UI element by description via Windows UI Automation and return its coordinates."""
+    import uiautomation as auto
 
-    b64 = None
+    target_lower = target_description.lower().strip()
     try:
-        if angle == "camera":
-            image_bytes, mime_type = _capture_camera()
-        else:
-            image_bytes, mime_type = _capture_screen()
-        b64 = base64.b64encode(image_bytes).decode("ascii")
-    except Exception:
-        pass
+        root = auto.GetRootControl()
+        best = (None, 0.0)
 
-    prompt = (
-        f"The user wants to click on: '{target_description}'\n\n"
-        f"Detected elements: {json.dumps(elements)}\n\n"
-        f"Which element matches? Return ONLY the index (number) of the matching element "
-        f"in the array, or -1 if none match. Return as JSON: {{\"index\": 0}}"
-    )
+        def _search(control, depth=0, max_depth=5):
+            nonlocal best
+            if depth > max_depth:
+                return
+            try:
+                name = (control.Name or "").strip()
+                if name:
+                    score = _ua_match_score(target_lower, name.lower())
+                    if score > best[1]:
+                        best = (control, score)
+                for child in control.GetChildren():
+                    _search(child, depth + 1, max_depth)
+            except Exception:
+                pass
 
-    client = genai.Client(api_key=_get_api_key(), http_options={"api_version": "v1beta"})
-    try:
-        parts = [prompt]
-        if b64:
-            parts.append({"inline_data": {"mime_type": mime_type, "data": b64}})
-        response = client.models.generate_content(
-            model="models/gemini-2.5-flash",
-            contents=parts,
-        )
-        text = response.text.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        try:
-            result = json.loads(text)
-        except json.JSONDecodeError:
-            return json.dumps({"found": False, "error": f"Model returned non-JSON: {text[:200]}"})
-        idx = result.get("index", -1)
-        if idx >= 0 and idx < len(elements):
-            elem = elements[idx]
-            bbox = elem.get("bbox", [])
-            if len(bbox) == 4:
-                center_x = (bbox[0] + bbox[2]) // 2
-                center_y = (bbox[1] + bbox[3]) // 2
-                return json.dumps({
-                    "found": True,
-                    "name": elem.get("name", ""),
-                    "type": elem.get("type", ""),
-                    "x": center_x,
-                    "y": center_y,
-                    "bbox": bbox,
-                })
+        _search(root)
+        ctrl = best[0]
+        if ctrl and ctrl.BoundingRectangle:
+            rect = ctrl.BoundingRectangle
+            cx = (rect.left + rect.right) // 2
+            cy = (rect.top + rect.bottom) // 2
+            return json.dumps({
+                "found": True,
+                "name": ctrl.Name or "",
+                "type": str(ctrl.ControlType),
+                "x": cx,
+                "y": cy,
+                "bbox": [rect.left, rect.top, rect.right, rect.bottom],
+            })
         return json.dumps({"found": False, "reason": f"No element matches '{target_description}'"})
     except Exception as e:
         return json.dumps({"found": False, "error": str(e)})
 
 
 def vision_navigate_tool(parameters: dict, player=None) -> str:
-    """Tool wrapper for vision-based navigation: find element and return coordinates to click."""
+    """Find and click a UI element by description using Windows UI Automation."""
     target = parameters.get("target", "")
     angle = parameters.get("angle", "screen")
     if not target:
@@ -599,29 +624,9 @@ def vision_navigate_tool(parameters: dict, player=None) -> str:
     data = json.loads(result) if isinstance(result, str) else result
     if data.get("found"):
         import pyautogui
-        # Scale coordinates from compressed image to actual screen
-        import mss
-        with mss.mss() as sct:
-            monitors = sct.monitors
-            mon = monitors[1] if len(monitors) > 1 else monitors[0]
-            screen_w, screen_h = mon["width"], mon["height"]
-        img_w, img_h = _IMG_MAX_W, _IMG_MAX_H
-        if _PIL:
-            try:
-                if angle == "camera":
-                    raw, _ = _capture_camera()
-                else:
-                    raw, _ = _capture_screen()
-                tmp = PIL.Image.open(io.BytesIO(raw))
-                img_w, img_h = tmp.size
-            except Exception:
-                pass
-        scale_x = screen_w / img_w if img_w > 0 else 1.0
-        scale_y = screen_h / img_h if img_h > 0 else 1.0
-        click_x = int(data["x"] * scale_x)
-        click_y = int(data["y"] * scale_y)
-        pyautogui.click(click_x, click_y)
-        return f"Clicked on '{data['name']}' at ({click_x}, {click_y}) (scaled from img {img_w}x{img_h} to screen {screen_w}x{screen_h})"
+
+        pyautogui.click(data["x"], data["y"])
+        return f"Clicked on '{data['name']}' at ({data['x']}, {data['y']})"
     return f"Could not find '{target}' on screen. Details: {data.get('reason', data.get('error', 'unknown'))}"
 
 if __name__ == "__main__":

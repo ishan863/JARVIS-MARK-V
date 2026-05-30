@@ -1,6 +1,5 @@
 import subprocess
 import sys
-import json
 import re
 import time
 from pathlib import Path
@@ -11,20 +10,9 @@ def get_base_dir():
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent
 
-BASE_DIR           = get_base_dir()
-API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"
 DESKTOP            = Path.home() / "Desktop"
 MAX_BUILD_ATTEMPTS = 3
 GEMINI_MODEL       = "gemini-2.5-flash"
-
-
-def _get_api_key() -> str:
-    try:
-        from config import get_config
-        return get_config().get("gemini_api_key", "")
-    except Exception:
-        with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)["gemini_api_key"]
 
 
 def _generate(prompt: str, task_type: str = "code_gen") -> str:
@@ -32,10 +20,8 @@ def _generate(prompt: str, task_type: str = "code_gen") -> str:
         from core.model_router import router
         return router.smart_route(prompt, task_type=task_type)
     except Exception:
-        import google.genai as genai
-        client = genai.Client(api_key=_get_api_key())
-        r = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        return r.text
+        from core.model_router import router
+        return router.generate(prompt, provider="nvidia")
 
 
 def _clean_code(text: str) -> str:
@@ -440,44 +426,45 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
             print(f"[Code] ⚠️ Could not read file: {err}")
 
     try:
-        import google.genai as genai
-        from google.genai import types
-
-        client = genai.Client(api_key=_get_api_key())
-
-        image_bytes  = screenshot_path.read_bytes()
-        image_base64 = _image_to_base64(screenshot_path)
+        from core.model_router import router
 
         user_question = description or "What error or problem do you see on the screen? How can it be fixed?"
 
-        context = ""
+        # OCR screenshot text instead of Gemini vision
+        ocr_text = ""
+        try:
+            import pytesseract
+            from PIL import Image
+            ocr_text = pytesseract.image_to_string(Image.open(screenshot_path)).strip()
+            print(f"[Code] OCR extracted {len(ocr_text)} chars")
+        except Exception:
+            pass
+
+        context_parts = []
+        if ocr_text:
+            context_parts.append(f"Text visible on screen:\n```\n{ocr_text[:3000]}\n```")
         if file_content:
-            context = f"\n\nAdditionally, here is the related file content:\n```\n{file_content[:4000]}\n```"
+            context_parts.append(f"Related file content:\n```\n{file_content[:4000]}\n```")
 
-        analysis_prompt = f"""You are an expert programmer and debugger analyzing a screenshot.
+        context = "\n\n".join(context_parts) if context_parts else "No text could be extracted from the screenshot."
 
-User's question: {user_question}{context}
+        analysis_prompt = f"""You are an expert programmer and debugger analyzing a development problem.
+
+User's question: {user_question}
+
+Available context:
+{context}
 
 Please:
-1. Identify any errors, exceptions, or problems visible on the screen
+1. Identify any errors, exceptions, or problems described
 2. Explain what is causing the problem in simple terms
 3. Provide a concrete fix or solution
 4. If there's code visible, show the corrected version
 
-Be specific and actionable. If you see an error message, quote it exactly."""
+Be specific and actionable."""
 
-        contents = [
-            types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-            analysis_prompt,
-        ]
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
-        )
-
-        analysis = response.text.strip()
-        print(f"[Code] ✅ Screen analysis complete")
+        analysis = router.smart_route(analysis_prompt, task_type="reasoning")
+        print(f"[Code] ✅ Screen analysis complete (no Gemini)")
 
         try:
             screenshot_path.unlink()
@@ -485,7 +472,6 @@ Be specific and actionable. If you see an error message, quote it exactly."""
             pass
 
         if file_path and file_content:
-
             code_match = re.search(r"```[a-zA-Z]*\n(.*?)```", analysis, re.DOTALL)
             if code_match:
                 fixed_code = code_match.group(1).strip()
@@ -497,7 +483,6 @@ Be specific and actionable. If you see an error message, quote it exactly."""
         return analysis
 
     except Exception as e:
-
         try:
             screenshot_path.unlink()
         except Exception:

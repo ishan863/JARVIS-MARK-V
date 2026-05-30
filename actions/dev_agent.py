@@ -13,22 +13,10 @@ def get_base_dir():
 
 
 BASE_DIR         = get_base_dir()
-API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
 PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
 
 from core.model_router import router as model_router
-from actions.file_controller import _track_file, _RECENT_FILES
-
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
-def _get_model(model_name: str):
-    import google.genai as genai
-    return genai.Client(api_key=_get_api_key())
 
 
 def _generate(prompt: str, task_type: str = "code_gen") -> str:
@@ -276,7 +264,7 @@ def _open_vscode(project_dir: Path) -> bool:
     for cmd in vscode_candidates:
         try:
             subprocess.Popen(
-                [cmd, str(project_dir)],
+                [cmd, "-n", str(project_dir)],
                 shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL

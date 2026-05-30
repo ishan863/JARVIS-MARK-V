@@ -1,8 +1,6 @@
 import sys
 from pathlib import Path
 
-from core.security import security
-
 
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -11,37 +9,6 @@ def _get_base_dir() -> Path:
 
 
 BASE_DIR = _get_base_dir()
-
-
-def _get_api_key() -> str:
-    keys = {}
-    try:
-        dec = security.decrypt_keys()
-        if isinstance(dec, dict):
-            keys = dec
-    except Exception:
-        keys = {}
-    return str(keys.get("gemini_api_key", "")).strip()
-
-
-def _gemini_search(query: str) -> str:
-    key = _get_api_key()
-    if not key:
-        raise ValueError("Gemini API key is missing.")
-
-    import google.genai as genai
-
-    client = genai.Client(api_key=key)
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=query,
-        config={"tools": [{"google_search": {}}]},
-    )
-
-    text = (response.text or "").strip()
-    if not text:
-        raise ValueError("Gemini returned an empty response.")
-    return text
 
 
 def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
@@ -79,12 +46,6 @@ def _format_ddg(query: str, results: list[dict]) -> str:
 
 
 def _compare(items: list[str], aspect: str) -> str:
-    query = f"Compare {', '.join(items)} in terms of {aspect}. Give specific facts and data."
-    try:
-        return _gemini_search(query)
-    except Exception:
-        pass
-
     all_results: dict[str, list] = {}
     for item in items:
         try:
@@ -123,10 +84,7 @@ def web_search(parameters: dict, response=None, player=None, session_memory=None
         if mode == "compare" and items:
             return _compare(items, aspect)
 
-        try:
-            return _gemini_search(query)
-        except Exception:
-            results = _ddg_search(query)
-            return _format_ddg(query, results)
+        results = _ddg_search(query)
+        return _format_ddg(query, results)
     except Exception as e:
         return f"Search failed: {e}"

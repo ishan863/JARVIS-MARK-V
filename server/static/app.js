@@ -12,6 +12,7 @@ let autoRefreshInterval = null, autoRefreshEnabled = false;
 let typingTimeout = null, _pingStart = 0, _latencyHistory = [];
 let _msgCallbacks = {}, _callbackId = 0, _recentCmds = [];
 let _swipeStartX = 0, _swipeStartY = 0, _swipeStartTime = 0;
+let _currentFileFolder = 'desktop';
 
 const SERVER_URL = `${location.protocol}//${location.host}`;
 const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
@@ -142,7 +143,10 @@ function handleMsg(msg) {
       break;
     case 'ai_text': hideTyping(); addChatMsg('ai', msg.data);
       document.getElementById('voice-transcript').textContent = msg.data; break;
-    case 'ai_audio': hideTyping(); playAudio(msg.data); break;
+    case 'ai_audio': hideTyping(); playAudioResponse(msg.data, msg.format || 'audio/wav'); break;
+    case 'ai_input_transcript':
+      document.getElementById('voice-status').textContent = msg.data || '';
+      document.getElementById('voice-transcript').textContent = msg.data || ''; break;
     case 'file_list_result': renderFileList(msg.data); break;
     case 'file_download_result':
       if (msg.data) {
@@ -164,6 +168,16 @@ function handleMsg(msg) {
         if (_latencyHistory.length > 10) _latencyHistory.shift();
         updateLatency();
         _pingStart = 0;
+      }
+      break;
+    case 'file_push':
+      if (msg.data) {
+        const blob = b64ToBlob(msg.data, 'application/octet-stream');
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = msg.name || 'download';
+        a.click();
+        URL.revokeObjectURL(url);
+        addChatMsg('system', 'Phone received: ' + (msg.name || 'file'));
       }
       break;
   }
@@ -336,7 +350,11 @@ function renderRecent() {
   });
 }
 
-// ── Voice ──
+// ── Voice (Streaming) — Web Audio API raw PCM16 ──
+let recAudioCtx = null;
+let scriptNode = null;
+let micStream = null;
+
 function toggleMic() {
   if (isRecording) { stopRecording(); return; }
   startRecording();
@@ -348,7 +366,7 @@ async function startRecording() {
   if (!md || typeof md.getUserMedia !== 'function') {
     const el = document.getElementById('voice-status');
     if (location.protocol !== 'https:') {
-      el.textContent = 'Scan the QR code — it now uses HTTPS for mic access.';
+      el.textContent = 'Scan the QR code — HTTPS needed for mic.';
     } else if (/iPhone|iPad|iPod/.test(navigator.userAgent)) {
       el.textContent = 'iOS: accept the self-signed cert, then mic works.';
     } else {
@@ -358,10 +376,59 @@ async function startRecording() {
   }
   try {
     const stream = await md.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-    audioChunks = [];
-    mediaRecorder = new MediaRecorder(stream, { mimeType: getMime() });
-    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-    mediaRecorder.start(100);
+    micStream = stream;
+    // Create AudioContext at the browser's default sample rate
+    // iOS Safari only supports hardware rate (usually 44100 or 48000)
+    recAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = recAudioCtx.createMediaStreamSource(stream);
+    const BUFFER_SIZE = 2048;
+    scriptNode = recAudioCtx.createScriptProcessor(BUFFER_SIZE, 1, 1);
+    source.connect(scriptNode);
+    scriptNode.connect(recAudioCtx.destination);
+    const sampleRate = recAudioCtx.sampleRate;
+    scriptNode.onaudioprocess = (e) => {
+      if (!isRecording) return;
+      const input = e.inputBuffer.getChannelData(0); // Float32, -1 to 1
+      // Downsample to 16kHz by decimation if rate is a multiple
+      let floatSamples;
+      if (sampleRate === 48000) {
+        // Decimate 48k → 16k (keep every 3rd sample)
+        const len = Math.floor(input.length / 3);
+        floatSamples = new Float32Array(len);
+        for (let i = 0; i < len; i++) floatSamples[i] = input[i * 3];
+      } else if (sampleRate === 44100) {
+        // Linear interpolation 44.1k → 16k
+        const len = Math.floor(input.length * 16000 / 44100);
+        floatSamples = new Float32Array(len);
+        for (let i = 0; i < len; i++) {
+          const pos = i * 44100 / 16000;
+          const idx = Math.floor(pos);
+          const frac = pos - idx;
+          if (idx + 1 < input.length) {
+            floatSamples[i] = input[idx] * (1 - frac) + input[idx + 1] * frac;
+          } else {
+            floatSamples[i] = input[idx];
+          }
+        }
+      } else {
+        // Pass through at native rate (server will resample)
+        floatSamples = input;
+      }
+      // Convert Float32 to PCM16 Int16
+      const pcm16 = new Int16Array(floatSamples.length);
+      for (let i = 0; i < floatSamples.length; i++) {
+        const s = Math.max(-1, Math.min(1, floatSamples[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      // Base64 encode the PCM16 bytes
+      const bytes = new Uint8Array(pcm16.buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const b64 = btoa(binary);
+      wsSend({ type: 'audio_chunk', data: b64, format: 'pcm16', rate: 16000 });
+    };
     isRecording = true;
     document.getElementById('mic-btn').classList.add('recording');
     document.getElementById('voice-status').textContent = 'Listening…';
@@ -375,27 +442,32 @@ async function startRecording() {
   }
 }
 function stopRecording() {
-  if (!isRecording || !mediaRecorder) return;
+  if (!isRecording) return;
   isRecording = false;
-  mediaRecorder.stop();
-  mediaRecorder.stream.getTracks().forEach(t => t.stop());
+  if (scriptNode) { try { scriptNode.disconnect(); } catch(e) {} scriptNode = null; }
+  if (recAudioCtx) { try { recAudioCtx.close(); } catch(e) {} recAudioCtx = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   document.getElementById('mic-btn').classList.remove('recording');
   document.getElementById('voice-status').textContent = 'Processing…';
   document.getElementById('voice-wave').classList.remove('active');
   if (navigator.vibrate) navigator.vibrate([20, 50, 20]);
-  mediaRecorder.onstop = async () => {
-    if (audioChunks.length < 1) { document.getElementById('voice-status').textContent = 'No audio detected'; return; }
-    const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
-    const b64 = await blob.arrayBuffer().then(buf => { let b='', u=new Uint8Array(buf); for(let i=0;i<u.byteLength;i++) b+=String.fromCharCode(u[i]); return btoa(b); });
-    wsSend({ type: 'audio', data: b64, format: mediaRecorder.mimeType });
-    showTyping();
-    document.getElementById('voice-status').textContent = 'Sent — waiting…';
-  };
+  // Signal Gemini that user is done speaking
+  wsSend({ type: 'audio_end' });
+  showTyping();
+  document.getElementById('voice-status').textContent = 'Waiting for response…';
 }
-function getMime() {
-  for (const t of ['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4','audio/wav'])
-    if (MediaRecorder.isTypeSupported(t)) return t;
-  return '';
+
+// ── Audio playback (AI voice to phone) ──
+let audioCtx = null;
+
+function playAudioResponse(b64, mime) {
+  try {
+    const blob = b64ToBlob(b64, mime || 'audio/wav');
+    const url = URL.createObjectURL(blob);
+    const a = new Audio(url);
+    a.onended = () => URL.revokeObjectURL(url);
+    a.play().catch(() => {});
+  } catch(e) {}
 }
 function b64ToBlob(b64, mime) {
   const bin = atob(b64), u = new Uint8Array(bin.length);
@@ -512,6 +584,7 @@ function sendCustomCmd() {
 // ── Files ──
 function listFiles(folder) {
   if (!paired) return;
+  _currentFileFolder = folder;
   document.getElementById('files-list').innerHTML = '<div class="muted-text"><span class="material-symbols-outlined" style="font-size:32px;display:block;margin-bottom:8px">hourglass_top</span>Loading…</div>';
   wsSend({ type: 'file_list', data: folder });
 }
@@ -535,7 +608,7 @@ function renderFileList(text) {
     } else {
       item.addEventListener('click', () => {
         const m = line.match(/^(.*?)\s+\[/);
-        if (m) { wsSend({ type: 'file_download', data: m[1].trim() }); addChatMsg('system', 'Downloading: ' + m[1].trim()); }
+        if (m) { wsSend({ type: 'file_download', data: _currentFileFolder + '/' + m[1].trim() }); addChatMsg('system', 'Downloading: ' + m[1].trim()); }
       });
     }
     c.appendChild(item);

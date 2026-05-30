@@ -308,14 +308,37 @@ async def _handle_ws_message(ws: WebSocket, msg: dict, manager: "RemoteManager")
             await ws.send_json({"type": "ack", "data": "sent"})
 
     elif mtype == "audio":
+        # One-shot audio (full recording, fallback)
         try:
             raw = base64.b64decode(msg.get("data", ""))
+            if not raw:
+                return
             fmt = msg.get("format", "wav")
-            pcm = _convert_to_pcm16(raw, fmt)
-            manager.route_audio_to_jarvis(pcm)
+            rate = int(msg.get("rate", 48000))
+            pcm = await loop.run_in_executor(None, _convert_to_pcm16, raw, fmt, rate)
+            if pcm and len(pcm) > 0:
+                manager.route_audio_to_jarvis(pcm)
             await ws.send_json({"type": "ack", "data": "audio_sent"})
         except Exception as e:
             await ws.send_json({"type": "error", "data": str(e)})
+
+    elif mtype == "audio_chunk":
+        # Streaming chunk from phone mic — decode and forward to Gemini real-time
+        try:
+            raw = base64.b64decode(msg.get("data", ""))
+            if not raw:
+                return
+            fmt = msg.get("format", "wav")
+            rate = int(msg.get("rate", 48000))
+            pcm = await loop.run_in_executor(None, _convert_to_pcm16, raw, fmt, rate)
+            if pcm and len(pcm) > 0:
+                manager.route_audio_chunk(pcm)
+        except Exception:
+            pass  # Silently drop bad chunks
+
+    elif mtype == "audio_end":
+        # Phone user released mic — signal Gemini to respond
+        manager.route_audio_end()
 
     elif mtype == "screenshot":
         img = await loop.run_in_executor(None, manager.take_screenshot)
@@ -457,8 +480,11 @@ def _do_drag(x1_pct: float, y1_pct: float, x2_pct: float, y2_pct: float) -> str:
 
 # ── File listing & download helpers ────────────────────────────────────────
 
+_CURRENT_FILE_FOLDER: str = ""  # Last folder listed — used to resolve file download paths
+
 def _list_files(folder: str) -> str:
     """List files in a common folder. Returns formatted text."""
+    global _CURRENT_FILE_FOLDER
     from pathlib import Path
     folders = {
         "desktop": Path.home() / "Desktop",
@@ -466,6 +492,7 @@ def _list_files(folder: str) -> str:
         "documents": Path.home() / "Documents",
     }
     root = folders.get(folder, Path.home())
+    _CURRENT_FILE_FOLDER = str(root.resolve())
     if not root.exists():
         return f"Folder '{folder}' not found"
     try:
@@ -480,24 +507,60 @@ def _list_files(folder: str) -> str:
         return f"Error: {e}"
 
 def _read_file_b64(path: str) -> str:
-    """Read a file and return base64 content."""
+    """Read a file and return base64 content. Tries resolving via CWD, then home."""
     import base64 as _b64
     from pathlib import Path
     try:
+        # Try resolving via actions.file_controller._resolve_path first
+        try:
+            from actions.file_controller import _resolve_path
+            fp = _resolve_path(path)
+            if fp.exists() and fp.is_file():
+                data = fp.read_bytes()
+                return _b64.b64encode(data).decode("ascii")
+        except Exception:
+            pass
+        # Try current listed folder + the path
+        if _CURRENT_FILE_FOLDER:
+            fp = Path(_CURRENT_FILE_FOLDER) / path
+            if fp.exists() and fp.is_file():
+                data = fp.read_bytes()
+                return _b64.b64encode(data).decode("ascii")
+        # Fallback: home folder + path
         fp = Path.home() / path
-        if not fp.exists() or not fp.is_file():
-            return ""
-        data = fp.read_bytes()
-        return _b64.b64encode(data).decode("ascii")
+        if fp.exists() and fp.is_file():
+            data = fp.read_bytes()
+            return _b64.b64encode(data).decode("ascii")
     except Exception:
-        return ""
+        pass
+    return ""
 
 # ── Audio conversion ───────────────────────────────────────────────────────
 
-def _convert_to_pcm16(raw: bytes, fmt: str) -> bytes:
-    """Convert audio bytes to PCM 16kHz 16-bit mono for Gemini Live API."""
+def _convert_to_pcm16(raw: bytes, fmt: str, rate: int = 48000) -> bytes:
+    """Convert audio bytes to PCM 16kHz 16-bit mono for Gemini Live API.
+    
+    Returns empty bytes if conversion fails (prevents sending invalid data to Gemini).
+    """
+    # PCM16 passthrough with optional resampling
     if fmt == "pcm16":
-        return raw
+        if not raw or len(raw) < 2:
+            return b""
+        if rate == 16000:
+            return raw
+        # Resample from native rate to 16000 Hz using numpy
+        import numpy as np
+        try:
+            samples = np.frombuffer(raw, dtype=np.int16)
+            if len(samples) == 0:
+                return b""
+            ratio = 16000 / rate
+            new_len = max(1, int(len(samples) * ratio))
+            indices = np.linspace(0, len(samples) - 1, new_len)
+            resampled = np.interp(indices, np.arange(len(samples)), samples.astype(np.float64)).astype(np.int16)
+            return resampled.tobytes()
+        except Exception:
+            return b""
     # Try pydub first for broad format support (webm, opus, ogg, mp4, etc.)
     try:
         from pydub import AudioSegment
@@ -515,17 +578,17 @@ def _convert_to_pcm16(raw: bytes, fmt: str) -> bytes:
 
         with wave.open(_io.BytesIO(raw)) as wf:
             channels = wf.getnchannels()
-            rate = wf.getframerate()
+            r = wf.getframerate()
             frames = wf.readframes(wf.getnframes())
 
         samples = np.frombuffer(frames, dtype=np.int16)
         if channels > 1:
             samples = samples.reshape(-1, channels).mean(axis=1).astype(np.int16)
-        if rate != 16000:
-            ratio = 16000 / rate
-            new_len = int(len(samples) * ratio)
+        if r != 16000:
+            ratio = 16000 / r
+            new_len = max(1, int(len(samples) * ratio))
             indices = np.linspace(0, len(samples) - 1, new_len)
-            samples = np.interp(indices, np.arange(len(samples)), samples).astype(np.int16)
+            samples = np.interp(indices, np.arange(len(samples)), samples.astype(np.float64)).astype(np.int16)
         return samples.tobytes()
     except Exception:
-        return raw
+        return b""
